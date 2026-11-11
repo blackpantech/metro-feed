@@ -1,0 +1,150 @@
+schema: spec-driven
+
+# Project context (optional)
+# Add only constraints that should guide OpenSpec artifacts and workflows.
+# Include constraints an agent cannot infer by reading the code.
+# Keep general project documentation and discoverable codebase facts out.
+# Example:
+#   context: |
+#     Designs and tasks must cover Windows, macOS, and Linux
+#     Write all artifacts in Spanish
+
+# Per-artifact rules (optional)
+# Add custom rules for specific artifacts.
+rules:
+  proposal:
+    - |
+      Before writing, read ticket.md in full if it exists, and
+      inspect the repository as well as the relevant existing specs.
+      The repository is authoritative for the current state of the
+      implementation; the ticket expresses the requested need. Flag any
+      contradictions between them without silently deciding which one
+      should be resolved.
+      If ticket.md is absent, use the request and the documents provided,
+      then flag its absence without inventing a ticket.
+    - |
+      Keep the standard sections. Add a "Ticket Analysis" section
+      presenting the business objective, scope, out-of-scope items,
+      constraints, and a summary of the acceptance criteria.
+      Keep implementation details in design.md.
+    - |
+      Add a "Requirements and Uncertainties" section distinguishing
+      confirmed requirements, deductions, provisional assumptions,
+      missing information, and points to confirm.
+      Indicate the source and impact of significant items.
+      Never present an assumption as a validated decision.
+    - |
+      Classify questions as Blocking, Important, or Optional.
+      For each one: problem, options, recommendation, and impacts.
+      Inspect the repository before asking a factual question.
+      Discuss with the user any decisions that would change
+      the contract, the architecture, or the breakdown before finalizing
+      the affected artifacts. Indicate the readiness status:
+      finalized, provisional, or blocked.
+    - |
+      In Impact, summarize the affected components, breaking
+      changes, dependencies, and main regression risks.
+      Cite relevant paths and symbols; refer to the design
+      for the detailed inventory. Do not start any refactoring outside the scope.
+
+  specs:
+    - |
+      Cover the business rules and acceptance criteria confirmed through
+      verifiable requirements and scenarios. Specify the preconditions,
+      relevant inputs, results, and observable errors; cover nominal cases,
+      boundaries, and relevant failures.
+    - |
+      Express non-functional constraints as observable contracts
+      only when they are requested or validated. Do not invent
+      performance thresholds or turn an unvalidated assumption into a
+      normative requirement.
+    - |
+      Strictly preserve the OpenSpec delta spec format.
+      Do not add code reports, file tables, framework choices, or
+      commit plans to the specs. This information belongs in
+      design.md or tasks.md.
+
+  design:
+    - |
+      When design.md is required according to the schema's criteria,
+      enrich Context with a targeted current state: relevant components,
+      entry points, contracts, persistence, errors, configuration,
+      tests, and tooling. For significant findings, provide the path,
+      symbol, or section, the current behavior, and the consequence
+      for development.
+    - |
+      Look for comparable implementations to reuse.
+      Add "Detailed Changes" with the table:
+      File | Action | Affected component |
+      Change to make | Justification | Risks.
+      Distinguish creation, modification, deletion, and renaming.
+      Explicitly identify new proposed paths;
+      do not present them as existing files.
+    - |
+      Describe responsibilities, interactions, flows, and contracts between
+      components; use a textual diagram if helpful.
+      Justify decisions and alternatives without over-engineering.
+      Address, as relevant, API/ABI, models, migrations,
+      dependencies, configuration, environment variables,
+      errors, security, performance, observability, and operations.
+      Specify compatibility, deployment, and rollback where applicable.
+    - |
+      Add "Test Strategy" with the matrix:
+      Requirement / scenario | Component | Test type |
+      Inputs / preconditions | Expected result | Likely location.
+      Infer frameworks, fixtures, and commands from the repository.
+      Cover the relevant categories: unit, integration,
+      contract/API, end-to-end, persistence/migration, non-regression,
+      errors, edge cases, security, and performance.
+    - |
+      Finish with an operational summary: chosen approach, mandatory
+      constraints, references to specs and tasks, remaining assumptions,
+      and residual risks. Keep in Open Questions only the questions
+      that can genuinely be deferred without changing the contract,
+      the approach, or the tasks.
+
+  tasks:
+    - |
+      Each numbered section represents a planned commit.
+      Specify, except in the following cases: title according to the
+      repository's conventions, objective, affected files, dependencies
+      on previous sections, verification commands, and completion criteria.
+      The commit plan does not authorize their automatic creation.
+    - |
+      A commit must be small to make it easier to split a branch
+      after the fact if the scope of a feature becomes too large. Ideally,
+      a commit contains only changes in one specific area of the
+      code or a single file, plus any temporary changes
+      needed to keep the project compiling.
+    - |
+      Order commits by dependencies and impact.
+      Each planned commit must be coherent, verifiable, and leave
+      the repository compilable with the checks applicable to it.
+      Plan transitional adaptations if necessary rather than
+      broken intermediate commits. Deliver tests and documentation
+      with the change they relate to, not only at the end of development.
+    - |
+      Keep each tracked task in the format "- [ ] X.Y Description".
+      In this description, indicate the change, the relevant files or
+      components, and the completion verification.
+      Link tasks to the specs' scenarios and to the design's decisions
+      when it exists, without copying these artifacts in full.
+    - |
+      Add a final integrated verification group covering:
+      build, formatting, lint, tests, migrations, API/ABI contracts,
+      errors, security, observability, performance, documentation,
+      and acceptance criteria. Justify any items that do not apply.
+      Use the repository's commands and the operations.apply guidance.
+      Distinguish success, pre-existing failure, and environment limitation;
+      never mark a verification that was not run as successful.
+
+# Per-operation guidance (optional)
+# Add advisory guidance for how apply and archive work should be conducted.
+# This is separate from artifact rules above.
+operations:
+  apply:
+    guidance:
+      - Annotate unused code with `#[cfg_attr(not(test),expect(dead_code, reason = "..."))]`.
+      - Finish the development of each commit with `cargo fmt`, `cargo clippy --all-targets -- -D warnings` and `cargo test`. Fix any issues reported before running the next command.
+      - Finish the development of each feature with `cargo test --release --features test-utils` and `cargo clippy -- -W clippy::pedantic`. Make all fixes before running the next command.
+      - If integration tests were modified during the development of a commit, run `cargo test --release --features test-utils`.
