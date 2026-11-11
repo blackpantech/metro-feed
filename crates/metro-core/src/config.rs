@@ -22,7 +22,7 @@ impl Config {
     /// Config dir name: `metro` (matches the binary name, not project name).
     #[must_use]
     pub fn config_dir() -> Option<PathBuf> {
-        directories::ProjectDirs::from("", "", "metro").map(|d| d.config_dir().to_path_buf())
+        directories::BaseDirs::new().map(|d| d.config_dir().join("metro"))
     }
 
     /// Get the path to the config file.

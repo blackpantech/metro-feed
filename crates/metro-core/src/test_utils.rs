@@ -29,7 +29,6 @@ pub fn cleanup_temp_db(path: &PathBuf) {
 /// Load fixtures from a directory.
 ///
 /// Returns a map of fixture name to SQL content.
-#[expect(dead_code, reason = "Fixture loader for future tests")]
 pub fn fixture_loader(dir: &str) -> std::collections::HashMap<String, String> {
     let mut fixtures = std::collections::HashMap::new();
 
