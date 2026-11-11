@@ -16,7 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust
-        uses: dtolnay/rust-action-stable@v1
+        uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: Check formatting
         run: cargo fmt --check
 
@@ -26,7 +26,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust
-        uses: dtolnay/rust-action-stable@v1
+        uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           components: clippy
       - name: Run clippy
@@ -41,7 +41,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust
-        uses: dtolnay/rust-action-stable@v1
+        uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: Run tests
         run: cargo test --workspace
 
@@ -54,6 +54,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust
-        uses: dtolnay/rust-action-stable@v1
+        uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: Run tests with test-utils
         run: cargo test --workspace --features test-utils
