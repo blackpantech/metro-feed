@@ -1,0 +1,15 @@
+[package]
+name = "metro"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+metro-cli = { path = "../metro-cli" }
+metro-tui = { path = "../metro-tui" }
+metro-core = { path = "../metro-core", optional = true }
+
+[features]
+test-utils = ["metro-core/test-utils"]
+
+[lints]
+workspace = true

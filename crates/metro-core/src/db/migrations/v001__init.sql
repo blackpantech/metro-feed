@@ -1,0 +1,3 @@
+-- M0: Placeholder migration. Actual schema arrives in M1.
+-- This migration exists to prove the migration runner works.
+-- No tables are created in M0.
