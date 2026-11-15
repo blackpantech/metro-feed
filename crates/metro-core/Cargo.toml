@@ -10,6 +10,9 @@ toml = { workspace = true }
 thiserror = { workspace = true }
 directories = { workspace = true }
 jiff = { workspace = true }
+ureq = { workspace = true }
+feed-rs = { workspace = true }
+scraper = { workspace = true }
 
 [features]
 test-utils = []
