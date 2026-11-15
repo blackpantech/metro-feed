@@ -86,4 +86,170 @@ mod tests {
         let version = get_version(&conn).unwrap();
         assert_eq!(version, 1);
     }
+
+    #[test]
+    fn test_migration_creates_all_tables() {
+        let mut conn = open_in_memory().unwrap();
+
+        run_migrations(&mut conn).unwrap();
+
+        // Verify all tables exist
+        let tables: Vec<String> = conn
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('folders', 'feeds', 'entries') ORDER BY name",
+            )
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert_eq!(tables, vec!["entries", "feeds", "folders"]);
+    }
+
+    #[test]
+    fn test_migration_fk_enforcement() {
+        let mut conn = open_in_memory().unwrap();
+
+        run_migrations(&mut conn).unwrap();
+
+        // Insert a folder first
+        conn.execute(
+            "INSERT INTO folders (id, name, kind) VALUES (1, 'Test Folder', 'feeds')",
+            [],
+        )
+        .unwrap();
+
+        // Try to insert a feed with invalid folder_id (should fail due to FK)
+        let result = conn.execute(
+            "INSERT INTO feeds (id, url, title, site_url, kind, folder_id) VALUES (1, 'https://example.com/feed', 'Test', 'https://example.com', 'rss', 999)",
+            [],
+        );
+
+        assert!(
+            result.is_err(),
+            "FK constraint should prevent inserting feed with non-existent folder_id"
+        );
+
+        // Insert feed with valid folder_id
+        let result = conn.execute(
+            "INSERT INTO feeds (id, url, title, site_url, kind, folder_id) VALUES (1, 'https://example.com/feed', 'Test', 'https://example.com', 'rss', 1)",
+            [],
+        );
+        assert!(result.is_ok());
+
+        // Try to insert an entry with invalid feed_id (should fail due to FK)
+        let entry_result = conn.execute(
+            "INSERT INTO entries (feed_id, guid, url, title, is_read) VALUES (999, 'guid1', 'https://example.com/1', 'Test Entry', 0)",
+            [],
+        );
+        assert!(
+            entry_result.is_err(),
+            "FK constraint should prevent inserting entry with non-existent feed_id"
+        );
+    }
+
+    #[test]
+    fn test_migration_fk_cascade_delete() {
+        let mut conn = open_in_memory().unwrap();
+
+        run_migrations(&mut conn).unwrap();
+
+        // Insert a folder
+        conn.execute(
+            "INSERT INTO folders (id, name, kind) VALUES (1, 'Test Folder', 'feeds')",
+            [],
+        )
+        .unwrap();
+
+        // Insert a feed in that folder
+        conn.execute(
+            "INSERT INTO feeds (id, url, title, site_url, kind, folder_id) VALUES (1, 'https://example.com/feed', 'Test', 'https://example.com', 'rss', 1)",
+            [],
+        )
+        .unwrap();
+
+        // Insert an entry for that feed
+        conn.execute(
+            "INSERT INTO entries (feed_id, guid, url, title, is_read) VALUES (1, 'guid1', 'https://example.com/1', 'Test Entry', 0)",
+            [],
+        )
+        .unwrap();
+
+        // Verify entry exists
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM entries", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+
+        // Delete the feed - entries should be cascade deleted
+        conn.execute("DELETE FROM feeds WHERE id = 1", []).unwrap();
+
+        // Verify entry is gone
+        let count_after: i64 = conn
+            .query_row("SELECT COUNT(*) FROM entries", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count_after, 0);
+    }
+
+    #[test]
+    fn test_migration_unique_guid_constraint() {
+        let mut conn = open_in_memory().unwrap();
+
+        run_migrations(&mut conn).unwrap();
+
+        // Insert a folder and feed
+        conn.execute(
+            "INSERT INTO folders (id, name, kind) VALUES (1, 'Test', 'feeds')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO feeds (id, url, title, site_url, kind, folder_id) VALUES (1, 'https://example.com/feed', 'Test', 'https://example.com', 'rss', 1)",
+            [],
+        )
+        .unwrap();
+
+        // Insert an entry
+        conn.execute(
+            "INSERT INTO entries (feed_id, guid, url, title, is_read) VALUES (1, 'unique-guid', 'https://example.com/1', 'Entry 1', 0)",
+            [],
+        )
+        .unwrap();
+
+        // Try to insert duplicate guid (should fail)
+        let result = conn.execute(
+            "INSERT INTO entries (feed_id, guid, url, title, is_read) VALUES (1, 'unique-guid', 'https://example.com/2', 'Entry 2', 0)",
+            [],
+        );
+
+        assert!(
+            result.is_err(),
+            "UNIQUE constraint should prevent duplicate guid"
+        );
+    }
+
+    #[test]
+    fn test_migration_indexes_exist() {
+        let mut conn = open_in_memory().unwrap();
+
+        run_migrations(&mut conn).unwrap();
+
+        // Verify indexes exist
+        let indexes: Vec<String> = conn
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_%' ORDER BY name",
+            )
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert!(indexes.contains(&"idx_feeds_folder_id".to_string()));
+        assert!(indexes.contains(&"idx_entries_feed_id".to_string()));
+        assert!(indexes.contains(&"idx_entries_published".to_string()));
+        assert!(indexes.contains(&"idx_entries_is_read".to_string()));
+        assert!(indexes.contains(&"idx_feeds_next_retry".to_string()));
+    }
 }
