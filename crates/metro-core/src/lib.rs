@@ -1,10 +1,12 @@
 //! Metro core library.
 //!
-//! Provides error types, configuration loading, database connectivity, and data models.
+//! Provides error types, configuration loading, database connectivity, data
+//! models, and the folder management API.
 
 pub mod config;
 pub mod db;
 pub mod error;
+pub mod folders;
 pub mod models;
 
 #[cfg(feature = "test-utils")]
