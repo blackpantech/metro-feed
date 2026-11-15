@@ -42,6 +42,19 @@ cargo clippy -- -W clippy::pedantic
 - `test-utils` feature gates the temp DB factory, in-memory DB helper, and fixture loader in `metro-core`.
 - Tests in `db/mod.rs` and `db/migrations/mod.rs` use `feature = "test-utils"` — they are skipped in a plain `cargo test --workspace` unless the feature is enabled.
 
+### Cross-cutting test strategy
+
+- **Shared fixtures**: Test feeds (RSS, Atom, JSON Feed) live in `test-fixtures/` for unit testing parsers without network.
+- **Mock HTTP**: Use `mockito` or similar for testing HTTP fetches without external network calls.
+- **Temp DB factory**: Use `test_utils::temp_db_path()` and `db::open_in_memory()` from `metro-core` (behind `test-utils` feature).
+- **Integration tests**: Live in `crates/metro-core/tests/` (e.g., `refresh_integration.rs`); marked `#[ignore]` if they require network, run with `cargo test -- --ignored` or `METRO_TEST_NETWORK=1`.
+- **CI considerations**: 
+  - `cargo test --workspace` runs unit tests only.
+  - `cargo test --workspace --features test-utils` includes integration tests gated by `test-utils`.
+  - Network-dependent tests should be skippable to avoid CI flakiness.
+- **Performance budget**: Refresh of 50 feeds should complete in under 10s (spec §4); verify in integration tests.
+- **Exit code testing**: Verify CLI commands return correct exit codes (0=ok, 5=partial success for feed failures).
+
 ## OpenSpec workflow
 
 This project uses the **spec-driven** OpenSpec schema. Change artifacts live in `openspec/changes/`, main specs in `openspec/specs/`.
