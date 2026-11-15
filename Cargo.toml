@@ -19,6 +19,10 @@ toml = "0.8"
 thiserror = "2.0"
 jiff = "0.2"
 directories = "6.0"
+ureq = "3.5"
+rustls = "0.24"
+feed-rs = "3.0"
+scraper = "0.29"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
