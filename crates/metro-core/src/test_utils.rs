@@ -35,15 +35,15 @@ pub fn fixture_loader(dir: &str) -> std::collections::HashMap<String, String> {
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().map_or(false, |ext| ext == "sql") {
-                if let Ok(content) = std::fs::read_to_string(&path) {
-                    let name = path
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("unknown")
-                        .to_string();
-                    fixtures.insert(name, content);
-                }
+            if path.extension().is_some_and(|ext| ext == "sql")
+                && let Ok(content) = std::fs::read_to_string(&path)
+            {
+                let name = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                fixtures.insert(name, content);
             }
         }
     }
