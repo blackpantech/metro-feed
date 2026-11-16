@@ -305,8 +305,9 @@ mod tests {
 
     /// Insert a minimal feed row into the given folder using direct SQL.
     ///
-    /// The feed CRUD API (M1 section 5) is not implemented yet, so folder
-    /// deletion tests build the "non-empty folder" state by hand.
+    /// Folder deletion tests build the "non-empty folder" state directly so
+    /// they stay focused on folder semantics instead of depending on the feed
+    /// management API.
     fn insert_feed_row(conn: &Connection, folder_row_id: u64) {
         conn.execute(
             "INSERT INTO feeds (url, title, site_url, kind, folder_id) \
