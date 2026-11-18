@@ -67,7 +67,11 @@
 //!   just before deletion, `move` as it is after the move.
 //! - `rename`: a status line, or the renamed feed as a `FeedInfo` object.
 //! - `info`: `label  value` lines (tab-separated when piped), or one
-//!   `FeedInfo` object.
+//!   `FeedInfo` object. Timestamps (`Last fetch`, `Last error`) are RFC 3339
+//!   UTC, or `never` when unset; `Error` is the last failure's message, or
+//!   `none`. In JSON they stay Unix seconds (`last_fetch`, `last_error_at`,
+//!   `null` when unset), like every timestamp of the `Feed` / `FeedInfo`
+//!   objects.
 //!
 //! Feed titles and URLs come from remote documents; the shared [`Output`]
 //! sanitizes them before printing (terminal control sequences are removed).
@@ -408,6 +412,14 @@ fn rename(
     output.outcome(&feed, &message)
 }
 
+/// Render an optional Unix timestamp for `feeds info`: RFC 3339 UTC, or
+/// `never` when unset.
+fn timestamp_or_never(seconds: Option<u64>) -> Cow<'static, str> {
+    seconds.map_or(Cow::Borrowed("never"), |at| {
+        Cow::Owned(format_timestamp(at))
+    })
+}
+
 /// `feeds info`: labelled metadata of one feed.
 fn info(conn: &Connection, output: &mut Output<'_>, id: FeedId) -> Result<(), MetroError> {
     let feed = get_feed_info(conn, id)?;
@@ -418,16 +430,12 @@ fn info(conn: &Connection, output: &mut Output<'_>, id: FeedId) -> Result<(), Me
         ("Site", Cow::Borrowed(feed.site_url.as_str())),
         ("Kind", Cow::Borrowed(feed.kind.as_str())),
         ("Folder", Cow::Borrowed(feed.folder_name.as_str())),
-        (
-            "Last fetch",
-            feed.last_fetch.map_or(Cow::Borrowed("never"), |at| {
-                Cow::Owned(format_timestamp(at))
-            }),
-        ),
+        ("Last fetch", timestamp_or_never(feed.last_fetch)),
         (
             "Error",
             Cow::Borrowed(feed.error_state.as_deref().unwrap_or("none")),
         ),
+        ("Last error", timestamp_or_never(feed.last_error_at)),
         ("Entries", Cow::Owned(feed.entry_count.to_string())),
     ];
     output.details(&feed, &fields)
@@ -925,6 +933,9 @@ mod command_tests {
         assert_eq!(values[0]["folder_name"], "Tech");
         assert_eq!(values[0]["id"], tech.inner());
         assert_eq!(values[1]["kind"], "atom");
+        // Healthy feeds carry an explicit `null` failure timestamp.
+        assert!(values[0]["last_error_at"].is_null());
+        assert!(values[0].as_object().unwrap().contains_key("last_error_at"));
     }
 
     #[test]
@@ -1059,7 +1070,8 @@ mod command_tests {
         let mut conn = test_conn();
         let id = subscribe(&mut conn, FEED_URL, None);
         conn.execute(
-            "UPDATE feeds SET last_fetch = 1767312000, error_state = 'HTTP 500' WHERE id = ?1",
+            "UPDATE feeds SET last_fetch = 1767312000, error_state = 'HTTP 500', \
+                 last_error_at = 1767315600 WHERE id = ?1",
             [id.inner()],
         )
         .unwrap();
@@ -1070,7 +1082,7 @@ mod command_tests {
             format!(
                 "ID\t{id}\nTitle\tAtom Blog\nURL\t{FEED_URL}\nSite\thttps://atom.example.com/\n\
                  Kind\tatom\nFolder\tUnsorted\nLast fetch\t2026-01-02T00:00:00Z\n\
-                 Error\tHTTP 500\nEntries\t2\n"
+                 Error\tHTTP 500\nLast error\t2026-01-02T01:00:00Z\nEntries\t2\n"
             )
         );
 
@@ -1078,6 +1090,9 @@ mod command_tests {
         let info: FeedInfo = serde_json::from_str(json.trim_end()).unwrap();
         assert_eq!(info.id, id);
         assert_eq!(info.error_state.as_deref(), Some("HTTP 500"));
+        assert_eq!(info.last_error_at, Some(1_767_315_600));
+        let raw: serde_json::Value = serde_json::from_str(json.trim_end()).unwrap();
+        assert_eq!(raw["last_error_at"], 1_767_315_600);
 
         let missing = exec(
             &mut conn,
@@ -1100,5 +1115,15 @@ mod command_tests {
         .unwrap();
         assert!(text.contains("Last fetch  never\n"), "{text}");
         assert!(text.contains("Error       none\n"), "{text}");
+        assert!(text.contains("Last error  never\n"), "{text}");
+
+        let json = exec(
+            &mut conn,
+            OutputFormat::Json,
+            FeedsCommand::Info { id: FeedId(1) },
+        )
+        .unwrap();
+        let raw: serde_json::Value = serde_json::from_str(json.trim_end()).unwrap();
+        assert!(raw["last_error_at"].is_null(), "{json}");
     }
 }

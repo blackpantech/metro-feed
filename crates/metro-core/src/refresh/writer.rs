@@ -16,14 +16,15 @@
 //! | `title` | parsed title **only while `last_fetch IS NULL`** and non-blank (D10) | unchanged |
 //! | `etag`, `last_modified` | the response's validators (may become `NULL`) | the validators reported by the fetcher (cached ones preserved) |
 //! | `last_fetch` | now (D6) | now (D6) |
-//! | `error_state` | cleared | cleared |
+//! | `error_state`, `last_error_at` | cleared | cleared |
 //! | `consecutive_failures`, `next_retry` | reset to `0` / `NULL` | reset to `0` / `NULL` |
 //! | entries | inserted with dedup, out-of-window ones skipped | none |
 //!
 //! # What a failed fetch records
 //!
-//! `error_state` receives the error message, `consecutive_failures` is
-//! incremented, and `next_retry` is set to the failure time plus the
+//! `error_state` receives the error message, `last_error_at` the failure
+//! time (Unix seconds; `feed-fetching` spec), `consecutive_failures` is
+//! incremented, and `next_retry` is set to that same failure time plus the
 //! exponential backoff delay for the new counter value, computed by
 //! [`next_retry_at`] (1m, 5m, 30m, 2h, 12h, then 24h for every further
 //! failure; `backoff` spec, D6). Until that deadline passes, the refresh
@@ -165,6 +166,7 @@ pub(crate) fn apply_fetch_success(
                      last_modified = ?5, \
                      last_fetch = ?6, \
                      error_state = NULL, \
+                     last_error_at = NULL, \
                      consecutive_failures = 0, \
                      next_retry = NULL \
                  WHERE id = ?7",
@@ -187,6 +189,7 @@ pub(crate) fn apply_fetch_success(
                  last_modified = ?2, \
                  last_fetch = ?3, \
                  error_state = NULL, \
+                 last_error_at = NULL, \
                  consecutive_failures = 0, \
                  next_retry = NULL \
              WHERE id = ?4",
@@ -253,9 +256,10 @@ fn insert_entries(
 
 /// Record a failed fetch in its own `IMMEDIATE` transaction.
 ///
-/// Sets `error_state` to `message`, increments `consecutive_failures`, and
-/// sets `next_retry` to the backoff deadline from [`next_retry_at`] for the
-/// incremented counter, relative to the failure time. `last_fetch` is left
+/// Sets `error_state` to `message` and `last_error_at` to the failure time
+/// (now), increments `consecutive_failures`, and sets `next_retry` to the
+/// backoff deadline from [`next_retry_at`] for the incremented counter,
+/// relative to that same failure time. `last_fetch` is left
 /// untouched (D6). A feed that was removed meanwhile is silently ignored:
 /// there is no row left to annotate.
 ///
@@ -291,9 +295,10 @@ pub(crate) fn store_refresh_failure(
     let next_retry = next_retry_at(failures, now);
 
     tx.execute(
-        "UPDATE feeds SET error_state = ?1, consecutive_failures = ?2, next_retry = ?3 \
-         WHERE id = ?4",
-        params![message, failures, next_retry, feed_id.inner()],
+        "UPDATE feeds SET error_state = ?1, last_error_at = ?2, \
+             consecutive_failures = ?3, next_retry = ?4 \
+         WHERE id = ?5",
+        params![message, now, failures, next_retry, feed_id.inner()],
     )?;
     tx.commit()?;
     Ok(())

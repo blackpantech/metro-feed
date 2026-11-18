@@ -9,6 +9,9 @@ CREATE TABLE IF NOT EXISTS folders (
 );
 
 -- Feeds table: subscribed feeds with metadata and fetch state.
+-- `last_fetch` is the last *successful* fetch (Unix seconds); `error_state`
+-- and `last_error_at` (Unix seconds) describe the last failed fetch and are
+-- both cleared by the next success (200 or 304).
 CREATE TABLE IF NOT EXISTS feeds (
     id INTEGER PRIMARY KEY,
     url TEXT NOT NULL UNIQUE,
@@ -20,6 +23,7 @@ CREATE TABLE IF NOT EXISTS feeds (
     last_modified TEXT,
     last_fetch INTEGER,
     error_state TEXT,
+    last_error_at INTEGER,
     consecutive_failures INTEGER DEFAULT 0,
     next_retry INTEGER,
     FOREIGN KEY (folder_id) REFERENCES folders(id) ON DELETE CASCADE
