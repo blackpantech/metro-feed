@@ -31,6 +31,8 @@ jobs:
           components: clippy
       - name: Run clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Run clippy with test-utils
+        run: cargo clippy --workspace --all-targets --features test-utils -- -D warnings
 
   test:
     name: Test
