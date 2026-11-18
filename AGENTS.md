@@ -13,8 +13,9 @@
 # Formatting
 cargo fmt --check
 
-# Linting (CI hard fails)
+# Linting (CI hard fails on both)
 cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --features test-utils -- -D warnings
 
 # Tests (CI runs both)
 cargo test --workspace
@@ -30,24 +31,24 @@ cargo clippy -- -W clippy::pedantic
 
 ## Architecture notes
 
-- **metro-core** owns config (`config.rs`), error types + exit code mapping (`error.rs`), DB connect + migration runner (`db/`).
+- **metro-core** owns config (`config.rs`), error types + exit code mapping (`error.rs`), DB connect + migration runner (`db/`), models + typed IDs (`models/`), `folders.rs`, `feeds.rs`, `entries.rs`, `discovery.rs`, `fetch.rs`, `refresh/`, and `prune.rs`. **metro-cli** is a thin frontend: `folders`, `feeds`, `refresh`, `view` commands with global `--json` / `--db`.
 - Config directory name is `metro` (not `metro-feed`), resolved via the `directories` crate → `$XDG_CONFIG_HOME/metro` on Linux, `~/Library/Application Support/metro` on macOS, `%APPDATA%/metro` on Windows.
 - DB uses `rusqlite` with `bundled` SQLite + `time` feature. Connections always enable WAL, 5s busy timeout, and FK enforcement.
-- Migration runner is hand-rolled (no external crate): `user_version` pragma tracks version, migrations are embedded SQL strings executed in a transaction. `v001__init.sql` exists but is deferred to M1 — no real schema tables yet.
+- Migration runner is hand-rolled (no external crate): `user_version` pragma tracks version, migrations are embedded SQL strings executed in a transaction. `v001__init.sql` defines `folders`, `feeds`, `entries`.
 - Schema freeze point: v001 is editable in place until v0.5 (M4). From M5, changes create real v002+ migrations with upgrade paths.
 - `metro-tui` is currently a stub that prints `"TUI arrives in M5, use \`metro --help\`"`.
 
 ## Test conventions
 
-- `test-utils` feature gates the temp DB factory, in-memory DB helper, and fixture loader in `metro-core`.
+- `test-utils` feature gates the temp DB factory, in-memory DB helper, and fixture helpers (`test_utils::load_fixture`) in `metro-core`.
 - Tests in `db/mod.rs` and `db/migrations/mod.rs` use `feature = "test-utils"` — they are skipped in a plain `cargo test --workspace` unless the feature is enabled.
 
 ### Cross-cutting test strategy
 
-- **Shared fixtures**: Test feeds (RSS, Atom, JSON Feed) live in `test-fixtures/` for unit testing parsers without network.
-- **Mock HTTP**: Use `mockito` or similar for testing HTTP fetches without external network calls.
+- **Shared fixtures**: Test feeds (RSS, Atom, JSON Feed) live in `test-fixtures/` for unit testing parsers without network; read them with `test_utils::load_fixture("atom.xml")`.
+- **Mock HTTP**: No mock-HTTP crate is a dependency; tests spin up a local `std::net::TcpListener` serving canned responses (see `fetch.rs` tests).
 - **Temp DB factory**: Use `test_utils::temp_db_path()` and `db::open_in_memory()` from `metro-core` (behind `test-utils` feature).
-- **Integration tests**: Live in `crates/metro-core/tests/` (e.g., `refresh_integration.rs`); marked `#[ignore]` if they require network, run with `cargo test -- --ignored` or `METRO_TEST_NETWORK=1`.
+- **Integration tests**: Live in `crates/metro-core/tests/` (`refresh_integration.rs`, `feed_fixtures.rs`), each a `[[test]]` target with `required-features = ["test-utils"]` in `crates/metro-core/Cargo.toml`. Tests that require network are marked `#[ignore]` and run with `cargo test -- --ignored`.
 - **CI considerations**: 
   - `cargo test --workspace` runs unit tests only.
   - `cargo test --workspace --features test-utils` includes integration tests gated by `test-utils`.
@@ -70,6 +71,6 @@ OpenCode commands are wired via `.opencode/commands/` and `.opencode/skills/`:
 ## Gotchas
 
 - `metro --help` and `metro --version` route through clap **even when called with no subcommand** (i.e. `metro --help` invokes CLI, `metro` alone invokes TUI stub).
-- CLI global flags `-v/--verbose` and `--log` are accepted from M0 but inert until M1.
+- CLI global flags `-v/--verbose` and `--log` are accepted since M0 but still inert; `--json` and `--db` are live.
 - Exit codes: `0` ok, `1` generic error, `2` usage error, `3` not found, `4` network error, `5` partial success. Defined in `metro-core/src/error.rs`.
 - CI runs on every push (all branches) and PRs to `main` / `develop`, across Linux + macOS + Windows. No local pre-commit hooks.

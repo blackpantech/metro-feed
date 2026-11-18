@@ -345,7 +345,8 @@ fn title_for(index: usize) -> String {
     format!("Feed {index}")
 }
 
-/// Guid of entry `label` in feed number `index` (globally unique).
+/// Guid of entry `label` in feed number `index`, unique across all test
+/// feeds (dedup itself only requires uniqueness within one feed).
 fn guid_for(index: usize, label: &str) -> String {
     format!("feed-{index}-{label}")
 }
