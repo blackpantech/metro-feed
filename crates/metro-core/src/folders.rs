@@ -17,7 +17,13 @@
 //! - **Idempotent creation**: [`create_folder`] returns the existing folder's
 //!   ID when a folder with the same (kind, name) already exists instead of
 //!   creating a duplicate. This is what makes [`ensure_default`] safe to call
-//!   repeatedly.
+//!   repeatedly. [`create_new_folder`] is the strict variant for
+//!   user-initiated creation (`metro folders add`), which must report a
+//!   duplicate instead of silently reusing it.
+//! - **Lookup by name**: frontends address folders by name; [`find_folder`]
+//!   resolves a name to a [`Folder`] with the same trimming and
+//!   case-insensitive rules as creation, so mutating functions keep taking
+//!   typed [`FolderId`]s.
 //! - **Safe deletion**: [`delete_folder`] refuses to delete a folder that
 //!   still contains feeds. The v001 schema cascades `feeds` → `entries`
 //!   deletions, so this guard is what prevents a folder deletion from
@@ -101,29 +107,43 @@ fn insert_folder(
     folder_id_from_row_id(tx.last_insert_rowid())
 }
 
-/// Create a folder, or return the existing folder's ID if it already exists.
+/// What a creation does when a folder with the same (kind, name) exists.
 ///
-/// The name is trimmed before use and must be non-empty. Names are compared
-/// case-insensitively (ASCII only) within the given kind, so this function
-/// is idempotent: creating `"Tech"` twice yields the same folder, and a
-/// `Feeds` folder never collides with a `Saved` folder of the same name. The
-/// display casing of the first creation is preserved for later listings.
+/// Shared by [`create_folder`] (idempotent, used by [`ensure_default`] and
+/// feed subscription) and [`create_new_folder`] (strict, used by the
+/// user-facing `folders add` command) so both run the exact same
+/// validation, lookup and insert inside one `IMMEDIATE` transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OnExisting {
+    /// Return the existing folder's ID.
+    Reuse,
+    /// Fail with a conflict error.
+    Reject,
+}
+
+/// Validate and trim a folder name.
 ///
 /// # Errors
 ///
 /// - [`MetroError::Usage`] if the trimmed name is empty.
-/// - [`MetroError::Generic`] if the database lookup or insert fails.
-pub fn create_folder(
-    conn: &mut Connection,
-    name: &str,
-    kind: FolderKind,
-) -> Result<FolderId, MetroError> {
+fn validated_name(name: &str) -> Result<&str, MetroError> {
     let name = name.trim();
     if name.is_empty() {
         return Err(MetroError::Usage(
             "folder name must not be empty".to_string(),
         ));
     }
+    Ok(name)
+}
+
+/// Shared implementation of [`create_folder`] and [`create_new_folder`].
+fn create_folder_with(
+    conn: &mut Connection,
+    name: &str,
+    kind: FolderKind,
+    on_existing: OnExisting,
+) -> Result<FolderId, MetroError> {
+    let name = validated_name(name)?;
 
     // IMMEDIATE takes the write lock up front so the duplicate check and the
     // insert are atomic with respect to other processes.
@@ -137,11 +157,99 @@ pub fn create_folder(
         )
         .optional()?;
 
-    let folder_id =
-        existing_id.map_or_else(|| insert_folder(&tx, name, kind), folder_id_from_row_id)?;
+    let folder_id = match (existing_id, on_existing) {
+        (None, _) => insert_folder(&tx, name, kind)?,
+        (Some(row_id), OnExisting::Reuse) => folder_id_from_row_id(row_id)?,
+        (Some(_), OnExisting::Reject) => {
+            // Dropping the transaction rolls it back; nothing was written.
+            return Err(MetroError::Generic(format!(
+                "a {kind} folder named {name:?} already exists"
+            )));
+        }
+    };
 
     tx.commit()?;
     Ok(folder_id)
+}
+
+/// Create a folder, or return the existing folder's ID if it already exists.
+///
+/// The name is trimmed before use and must be non-empty. Names are compared
+/// case-insensitively (ASCII only) within the given kind, so this function
+/// is idempotent: creating `"Tech"` twice yields the same folder, and a
+/// `Feeds` folder never collides with a `Saved` folder of the same name. The
+/// display casing of the first creation is preserved for later listings.
+///
+/// Use [`create_new_folder`] instead when an existing folder must be
+/// reported as an error (the `folders add` command).
+///
+/// # Errors
+///
+/// - [`MetroError::Usage`] if the trimmed name is empty.
+/// - [`MetroError::Generic`] if the database lookup or insert fails.
+pub fn create_folder(
+    conn: &mut Connection,
+    name: &str,
+    kind: FolderKind,
+) -> Result<FolderId, MetroError> {
+    create_folder_with(conn, name, kind, OnExisting::Reuse)
+}
+
+/// Create a folder, failing if one with the same (kind, name) already exists,
+/// and return the stored [`Folder`] (trimmed name, new ID).
+///
+/// Same name rules as [`create_folder`] (trimmed, non-empty, ASCII
+/// case-insensitive within a kind), but strict: this is the user-facing
+/// creation behind `metro folders add`, whose contract (`feeds-cli` spec,
+/// "Duplicate folder name fails") is to report a duplicate instead of
+/// silently succeeding. The duplicate check and the insert run in one
+/// `IMMEDIATE` transaction, so two concurrent callers cannot both succeed.
+///
+/// # Errors
+///
+/// - [`MetroError::Usage`] if the trimmed name is empty.
+/// - [`MetroError::Generic`] if a folder of the same kind already uses the
+///   name (the same variant [`rename_folder`] uses for name conflicts), or
+///   if the database lookup or insert fails.
+pub fn create_new_folder(
+    conn: &mut Connection,
+    name: &str,
+    kind: FolderKind,
+) -> Result<Folder, MetroError> {
+    let id = create_folder_with(conn, name, kind, OnExisting::Reject)?;
+    // `create_folder_with` stores exactly the validated (trimmed) name, so the
+    // record can be built without a second query.
+    Ok(Folder::new(id, validated_name(name)?, kind))
+}
+
+/// Find a folder of the given kind by name.
+///
+/// The name is trimmed and compared case-insensitively (ASCII only), exactly
+/// like the duplicate check of [`create_folder`], so any spelling a user
+/// could have created the folder with resolves to it. This is how frontends
+/// turn a user-supplied folder name (`metro folders rename Tech …`,
+/// `--folder Tech`) into the [`FolderId`] the mutating functions take.
+///
+/// # Errors
+///
+/// - [`MetroError::Usage`] if the trimmed name is empty.
+/// - [`MetroError::NotFound`] if no folder of that kind uses the name.
+/// - [`MetroError::Generic`] if the database query fails or the stored row
+///   is invalid.
+pub fn find_folder(conn: &Connection, name: &str, kind: FolderKind) -> Result<Folder, MetroError> {
+    let name = validated_name(name)?;
+
+    let row: Option<(i64, String, String)> = conn
+        .query_row(
+            "SELECT id, name, kind FROM folders WHERE kind = ?1 AND lower(name) = lower(?2)",
+            params![kind.as_str(), name],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+
+    let (row_id, stored_name, kind_text) =
+        row.ok_or_else(|| MetroError::NotFound(format!("no {kind} folder named {name:?}")))?;
+    folder_from_columns(row_id, stored_name, &kind_text)
 }
 
 /// List all folders of the given kind, sorted by name.
@@ -190,12 +298,7 @@ pub fn rename_folder(
     id: FolderId,
     new_name: &str,
 ) -> Result<(), MetroError> {
-    let new_name = new_name.trim();
-    if new_name.is_empty() {
-        return Err(MetroError::Usage(
-            "folder name must not be empty".to_string(),
-        ));
-    }
+    let new_name = validated_name(new_name)?;
 
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
@@ -570,5 +673,63 @@ mod tests {
 
         let folders = list_folders(&conn, FolderKind::Feeds).unwrap();
         assert_eq!(folders.len(), 1);
+    }
+
+    #[test]
+    fn test_create_new_folder_creates() {
+        let mut conn = test_conn();
+        let created = create_new_folder(&mut conn, "  Tech ", FolderKind::Feeds).unwrap();
+        assert_eq!(created.name(), "Tech");
+        assert_eq!(created.kind(), FolderKind::Feeds);
+        let found = find_folder(&conn, "Tech", FolderKind::Feeds).unwrap();
+        assert_eq!(found, created);
+    }
+
+    #[test]
+    fn test_create_new_folder_duplicate_rejected_case_insensitive() {
+        let mut conn = test_conn();
+        create_new_folder(&mut conn, "Tech", FolderKind::Feeds).unwrap();
+        let err = create_new_folder(&mut conn, " tech ", FolderKind::Feeds).unwrap_err();
+        assert!(matches!(err, MetroError::Generic(_)), "got {err:?}");
+        assert_eq!(list_folders(&conn, FolderKind::Feeds).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_create_new_folder_other_kind_is_separate() {
+        let mut conn = test_conn();
+        create_new_folder(&mut conn, "Tech", FolderKind::Feeds).unwrap();
+        create_new_folder(&mut conn, "Tech", FolderKind::Saved).unwrap();
+    }
+
+    #[test]
+    fn test_create_new_folder_empty_name_rejected() {
+        let mut conn = test_conn();
+        let err = create_new_folder(&mut conn, "  ", FolderKind::Feeds).unwrap_err();
+        assert!(matches!(err, MetroError::Usage(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn test_find_folder_case_insensitive_returns_stored_casing() {
+        let mut conn = test_conn();
+        let id = create_folder(&mut conn, "Tech", FolderKind::Feeds).unwrap();
+        let folder = find_folder(&conn, "  TECH ", FolderKind::Feeds).unwrap();
+        assert_eq!(folder.id(), id);
+        assert_eq!(folder.name(), "Tech");
+        assert_eq!(folder.kind(), FolderKind::Feeds);
+    }
+
+    #[test]
+    fn test_find_folder_wrong_kind_not_found() {
+        let mut conn = test_conn();
+        create_folder(&mut conn, "Tech", FolderKind::Feeds).unwrap();
+        let err = find_folder(&conn, "Tech", FolderKind::Saved).unwrap_err();
+        assert!(matches!(err, MetroError::NotFound(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn test_find_folder_empty_name_rejected() {
+        let conn = test_conn();
+        let err = find_folder(&conn, "", FolderKind::Feeds).unwrap_err();
+        assert!(matches!(err, MetroError::Usage(_)), "got {err:?}");
     }
 }
