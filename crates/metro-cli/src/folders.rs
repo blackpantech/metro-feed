@@ -13,7 +13,8 @@
 //!
 //! This module only parses arguments and renders results; all rules (name
 //! trimming, case-insensitive lookup, duplicate rejection, refusing to remove
-//! a non-empty folder) are enforced by `metro_core::folders`, and errors are
+//! a non-empty folder, protecting the default `Unsorted` feed folder) are
+//! enforced by `metro_core::folders`, and errors are
 //! returned untouched so their [`MetroError`] variant decides the exit code:
 //!
 //! | Situation                          | Core error              | Exit |
@@ -22,6 +23,7 @@
 //! | unknown folder (rename/remove)     | `NotFound`              | 3    |
 //! | duplicate name (add/rename)        | `Generic`               | 1    |
 //! | folder still contains feeds        | `Generic`               | 1    |
+//! | default `Unsorted` (rename/remove) | `Generic`               | 1    |
 //!
 //! # Output
 //!
@@ -66,7 +68,7 @@ pub enum FoldersCommand {
         #[command(flatten)]
         kind: KindOption,
     },
-    /// Rename a folder
+    /// Rename a folder (the default Unsorted folder cannot be renamed)
     Rename {
         /// Current folder name (case-insensitive)
         old_name: String,
@@ -75,7 +77,8 @@ pub enum FoldersCommand {
         #[command(flatten)]
         kind: KindOption,
     },
-    /// Remove an empty folder (refuses folders that still contain feeds)
+    /// Remove an empty folder (refuses folders that still contain feeds and
+    /// the default Unsorted folder)
     Remove {
         /// Folder name (case-insensitive)
         name: String,
@@ -268,7 +271,7 @@ mod command_tests {
     use metro_core::db::migrations::run_migrations;
     use metro_core::db::open_in_memory;
     use metro_core::feeds::add_feed;
-    use metro_core::folders::create_folder;
+    use metro_core::folders::{create_folder, ensure_default};
 
     use super::*;
     use crate::output::OutputFormat;
@@ -485,6 +488,67 @@ mod command_tests {
             list(&mut conn, OutputFormat::Tabular, KindArg::Feeds),
             "Tech\n"
         );
+    }
+
+    #[test]
+    fn test_remove_default_folder_fails() {
+        let mut conn = test_conn();
+        ensure_default(&mut conn).unwrap();
+
+        let err = exec(
+            &mut conn,
+            OutputFormat::Human,
+            FoldersCommand::Remove {
+                name: "unsorted".to_string(),
+                kind: kind(KindArg::Feeds),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err.exit_code(), 1, "{err}");
+        assert!(err.to_string().contains("default"), "{err}");
+        assert_eq!(
+            list(&mut conn, OutputFormat::Tabular, KindArg::Feeds),
+            "Unsorted\n"
+        );
+    }
+
+    #[test]
+    fn test_rename_default_folder_fails() {
+        let mut conn = test_conn();
+        ensure_default(&mut conn).unwrap();
+
+        let err = exec(
+            &mut conn,
+            OutputFormat::Human,
+            FoldersCommand::Rename {
+                old_name: "Unsorted".to_string(),
+                new_name: "X".to_string(),
+                kind: kind(KindArg::Feeds),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err.exit_code(), 1, "{err}");
+        assert!(err.to_string().contains("default"), "{err}");
+        assert_eq!(
+            list(&mut conn, OutputFormat::Tabular, KindArg::Feeds),
+            "Unsorted\n"
+        );
+    }
+
+    #[test]
+    fn test_saved_folder_named_unsorted_is_not_protected() {
+        let mut conn = test_conn();
+        add(&mut conn, "Unsorted", KindArg::Saved).unwrap();
+        exec(
+            &mut conn,
+            OutputFormat::Human,
+            FoldersCommand::Remove {
+                name: "Unsorted".to_string(),
+                kind: kind(KindArg::Saved),
+            },
+        )
+        .unwrap();
+        assert_eq!(list(&mut conn, OutputFormat::Tabular, KindArg::Saved), "");
     }
 
     #[test]
