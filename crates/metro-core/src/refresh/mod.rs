@@ -92,7 +92,7 @@ use crate::models::{FeedId, FolderId};
 use crate::prune::{DEFAULT_WINDOW_DAYS, prune_entries, validate_window};
 use crate::refresh::writer::{now_unix, store_refresh_failure, store_refresh_success};
 
-pub use subscribe::{FeedPreview, SubscribeOutcome, subscribe_feed};
+pub use subscribe::{FeedPreview, SubscribeOutcome, subscribe_feed, subscribe_url};
 
 /// Default number of worker threads used by [`refresh_feeds`].
 pub const DEFAULT_CONCURRENCY: usize = 8;

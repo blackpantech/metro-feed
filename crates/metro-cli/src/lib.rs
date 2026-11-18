@@ -8,8 +8,8 @@
 //!
 //! - [`Cli`] / [`Commands`]: the argument model. Global flags live on
 //!   [`Cli`]; each command family is one [`Commands`] variant whose argument
-//!   types and handler live in their own module (`folders`, later `feeds`
-//!   and `refresh`), each exposing `run(args, conn, output)`.
+//!   types and handler live in their own module (`feeds`, `folders`, later
+//!   `refresh`), each exposing `run(args, conn, output)`.
 //! - `database`: opens the migrated database (`--db` override or the
 //!   platform default), delegating to `metro_core::db`.
 //! - `output`: the human / tab-separated / NDJSON renderings every command
@@ -32,10 +32,12 @@ use std::path::PathBuf;
 use clap::{ArgAction, CommandFactory, Parser, Subcommand};
 use metro_core::MetroError;
 
+use crate::feeds::FeedsArgs;
 use crate::folders::FoldersArgs;
 use crate::output::{IgnoreBrokenPipe, Output, OutputFormat, write_error};
 
 mod database;
+mod feeds;
 mod folders;
 mod output;
 
@@ -68,6 +70,8 @@ pub struct Cli {
 /// Top-level commands.
 #[derive(Debug, Subcommand)]
 pub enum Commands {
+    /// Manage feed subscriptions
+    Feeds(FeedsArgs),
     /// Manage feed and saved-item folders
     Folders(FoldersArgs),
 }
@@ -129,6 +133,10 @@ fn execute(cli: &Cli, out: &mut dyn Write, err: &mut dyn Write, stdout_is_termin
 /// module's `run`.
 fn dispatch(cli: &Cli, command: &Commands, output: &mut Output<'_>) -> Result<(), MetroError> {
     match command {
+        Commands::Feeds(args) => {
+            let mut conn = database::open(cli.db.as_deref())?;
+            feeds::run(args, &mut conn, output)
+        }
         Commands::Folders(args) => {
             let mut conn = database::open(cli.db.as_deref())?;
             folders::run(args, &mut conn, output)
@@ -188,12 +196,31 @@ mod tests {
     }
 
     #[test]
+    fn test_feeds_help_works() {
+        let err = Cli::try_parse_from(["metro", "feeds", "--help"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+        assert_eq!(err.exit_code(), 0);
+        let help = err.to_string();
+        for sub in ["add", "list", "remove", "move", "rename", "info"] {
+            assert!(help.contains(sub), "missing {sub} in:\n{help}");
+        }
+
+        let err = Cli::try_parse_from(["metro", "feeds", "add", "--help"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+        let help = err.to_string();
+        for flag in ["--folder", "--title", "--dry-run"] {
+            assert!(help.contains(flag), "missing {flag} in:\n{help}");
+        }
+    }
+
+    #[test]
     fn test_no_subcommand_prints_help() {
         let cli = Cli::try_parse_from(["metro", "-v"]).unwrap();
         let (mut out, mut err) = (Vec::new(), Vec::new());
         assert_eq!(execute(&cli, &mut out, &mut err, false), 0);
         let out = String::from_utf8(out).unwrap();
         assert!(out.contains("folders"), "{out}");
+        assert!(out.contains("feeds"), "{out}");
         assert!(err.is_empty());
     }
 
@@ -268,6 +295,175 @@ mod end_to_end_tests {
         let run = metro(&db, &["folders", "remove", "technology"]);
         assert_eq!(run.code, 0, "{}", run.err);
         assert_eq!(metro(&db, &["folders", "list"]).out, "");
+    }
+
+    /// A local HTTP server answering `connections` requests by path, so
+    /// `feeds add` runs its real autodiscovery and fetch code without the
+    /// internet. Routes are `(path, content type, body)`; unknown paths get
+    /// a 404. Returns the base URL (`http://127.0.0.1:<port>`).
+    fn serve(routes: Vec<(&'static str, &'static str, String)>, connections: usize) -> String {
+        use std::io::{BufRead, BufReader};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(connections) {
+                let Ok(mut stream) = stream else { return };
+                let mut reader = BufReader::new(&stream);
+                let mut request_line = String::new();
+                let _ = reader.read_line(&mut request_line);
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                        break;
+                    }
+                }
+                let path = request_line.split_whitespace().nth(1).unwrap_or("");
+                let route = routes.iter().find(|(p, _, _)| *p == path);
+                let (status, content_type, body) = route.map_or(
+                    ("404 Not Found", "text/plain", ""),
+                    |(_, content_type, body)| ("200 OK", *content_type, body.as_str()),
+                );
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        base
+    }
+
+    /// A one-item RSS document; its links are relative, so they resolve
+    /// against whichever local address served it.
+    fn rss() -> String {
+        "<?xml version=\"1.0\"?><rss version=\"2.0\"><channel>\
+         <title>Local Blog</title><link>/</link><description>d</description>\
+         <item><title>One</title><link>/1</link><guid>g1</guid></item>\
+         </channel></rss>"
+            .to_string()
+    }
+
+    #[test]
+    fn test_feeds_add_with_autodiscovery_end_to_end() {
+        let db = TempDb(temp_db_path());
+        // Two requests: discovery (`/`), then the feed fetch (`/feed.xml`).
+        let base = serve_blog();
+
+        let run = metro(&db, &["feeds", "add", &base]);
+        assert_eq!(run.code, 0, "{}", run.err);
+        assert_eq!(
+            run.out,
+            "Subscribed to f1 \"Local Blog\" (rss, 1 new entry) in folder \"Unsorted\"\n"
+        );
+
+        let run = metro(&db, &["--json", "feeds", "list"]);
+        let value: serde_json::Value = serde_json::from_str(run.out.trim_end()).unwrap();
+        assert_eq!(value["url"], format!("{base}/feed.xml"));
+        assert_eq!(value["kind"], "rss");
+        assert_eq!(value["folder_name"], "Unsorted");
+
+        // Already subscribed: reported without any network access (the
+        // server has stopped accepting connections by now).
+        let run = metro(&db, &["feeds", "add", &format!("{base}/feed.xml")]);
+        assert_eq!(run.code, 0, "{}", run.err);
+        assert!(run.out.starts_with("Already subscribed: f1"), "{}", run.out);
+
+        let run = metro(&db, &["feeds", "info", "f1"]);
+        assert_eq!(run.code, 0, "{}", run.err);
+        assert!(run.out.contains("Entries\t1\n"), "{}", run.out);
+
+        let run = metro(&db, &["feeds", "rename", "f1", "Mine"]);
+        assert_eq!(run.code, 0, "{}", run.err);
+        assert_eq!(metro(&db, &["folders", "add", "Tech"]).code, 0);
+        let run = metro(&db, &["feeds", "move", "f1", "--folder", "Tech"]);
+        assert_eq!(run.code, 0, "{}", run.err);
+        let run = metro(&db, &["feeds", "list", "--folder", "Tech"]);
+        assert_eq!(run.out, format!("f1\tMine\t{base}/feed.xml\n"));
+
+        let run = metro(&db, &["feeds", "remove", "f1"]);
+        assert_eq!(run.code, 0, "{}", run.err);
+        assert_eq!(metro(&db, &["feeds", "list"]).out, "");
+    }
+
+    /// Serve a blog homepage advertising its RSS feed, for two requests.
+    fn serve_blog() -> String {
+        // The port is only known once bound, so the page advertises the
+        // feed with a relative href, resolved by autodiscovery.
+        let html = "<html><head><link rel=\"alternate\" type=\"application/rss+xml\" \
+                    href=\"/feed.xml\"></head><body></body></html>"
+            .to_string();
+        serve(
+            vec![
+                ("/", "text/html", html),
+                ("/feed.xml", "application/rss+xml", rss()),
+            ],
+            2,
+        )
+    }
+
+    #[test]
+    fn test_feeds_add_dry_run_and_failures_end_to_end() {
+        let db = TempDb(temp_db_path());
+        let base = serve(
+            vec![
+                ("/feed.xml", "application/rss+xml", rss()),
+                ("/broken.xml", "application/xml", "not a feed".to_string()),
+            ],
+            // dry run: 2, broken feed: 2, missing: 1 (discovery only)
+            5,
+        );
+
+        let run = metro(
+            &db,
+            &["feeds", "add", &format!("{base}/feed.xml"), "--dry-run"],
+        );
+        assert_eq!(run.code, 0, "{}", run.err);
+        assert!(
+            run.out
+                .starts_with("Dry run: would subscribe to \"Local Blog\""),
+            "{}",
+            run.out
+        );
+        assert_eq!(metro(&db, &["feeds", "list"]).out, "");
+        assert_eq!(metro(&db, &["folders", "list"]).out, "");
+
+        // Parse failure: exit 1, nothing saved.
+        let run = metro(&db, &["feeds", "add", &format!("{base}/broken.xml")]);
+        assert_eq!(run.code, 1, "{}", run.err);
+        assert!(run.err.starts_with("metro: "), "{}", run.err);
+
+        // HTTP 404 during discovery: network error, exit 4.
+        let run = metro(&db, &["feeds", "add", &format!("{base}/missing.xml")]);
+        assert_eq!(run.code, 4, "{}", run.err);
+        assert_eq!(metro(&db, &["feeds", "list"]).out, "");
+    }
+
+    #[test]
+    fn test_feeds_usage_and_not_found_exit_codes() {
+        let db = TempDb(temp_db_path());
+        assert_eq!(metro(&db, &["feeds", "info", "f9"]).code, 3);
+        assert_eq!(metro(&db, &["feeds", "remove", "f9"]).code, 3);
+        assert_eq!(
+            metro(&db, &["feeds", "add", "ftp://example.com/feed"]).code,
+            2
+        );
+        assert_eq!(
+            metro(
+                &db,
+                &[
+                    "feeds",
+                    "add",
+                    "http://127.0.0.1:9/feed.xml",
+                    "--folder",
+                    "Nope"
+                ]
+            )
+            .code,
+            3
+        );
     }
 
     #[test]

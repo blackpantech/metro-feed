@@ -11,8 +11,10 @@
 //!
 //! Commands never format by hand: they hand records to [`Output::list`] (a
 //! list of serializable records plus a function turning one record into its
-//! text columns) or [`Output::outcome`] (one serializable result plus its
-//! human message), so every command family gets the same contract for free.
+//! text columns), [`Output::outcome`] (one serializable result plus its
+//! human message), or [`Output::details`] (one serializable record plus its
+//! labelled fields, for `info`-style commands), so every command family gets
+//! the same contract for free.
 //!
 //! # Safety of displayed text
 //!
@@ -175,6 +177,33 @@ impl<'w> Output<'w> {
         }
     }
 
+    /// Render the details of a single record (`feeds info` …).
+    ///
+    /// - JSON: `record` serialized as one line.
+    /// - Human: one `label  value` line per field, values aligned.
+    /// - Tabular: one `label<TAB>value` line per field.
+    ///
+    /// Labels and values are sanitized like list columns.
+    ///
+    /// # Errors
+    ///
+    /// [`MetroError::Generic`] if serialization or writing fails.
+    pub fn details<T: Serialize>(
+        &mut self,
+        record: &T,
+        fields: &[(&str, Cow<'_, str>)],
+    ) -> Result<(), MetroError> {
+        let rows: Vec<[&str; 2]> = fields
+            .iter()
+            .map(|(label, value)| [*label, value.as_ref()])
+            .collect();
+        match self.format {
+            OutputFormat::Json => self.json_line(record),
+            OutputFormat::Tabular => rows.iter().try_for_each(|row| self.tabular_line(row)),
+            OutputFormat::Human => self.aligned_rows(&rows),
+        }
+    }
+
     /// Write one compact JSON object followed by a newline.
     fn json_line<T: Serialize>(&mut self, record: &T) -> Result<(), MetroError> {
         serde_json::to_writer(&mut *self.writer, record)
@@ -183,17 +212,21 @@ impl<'w> Output<'w> {
     }
 
     /// Write one record as tab-separated sanitized fields.
-    fn tabular_line(&mut self, fields: &[String]) -> Result<(), MetroError> {
-        let line: Vec<Cow<'_, str>> = fields.iter().map(|f| sanitize(f)).collect();
+    fn tabular_line<S: AsRef<str>>(&mut self, fields: &[S]) -> Result<(), MetroError> {
+        let line: Vec<Cow<'_, str>> = fields.iter().map(|f| sanitize(f.as_ref())).collect();
         writeln!(self.writer, "{}", line.join("\t")).map_err(|e| write_error(&e))
     }
 
     /// Write records with every column but the last padded to its widest
     /// value, so columns line up in a terminal.
-    fn aligned_rows(&mut self, rows: &[Vec<String>]) -> Result<(), MetroError> {
+    fn aligned_rows<R, S>(&mut self, rows: &[R]) -> Result<(), MetroError>
+    where
+        R: AsRef<[S]>,
+        S: AsRef<str>,
+    {
         let sanitized: Vec<Vec<Cow<'_, str>>> = rows
             .iter()
-            .map(|row| row.iter().map(|f| sanitize(f)).collect())
+            .map(|row| row.as_ref().iter().map(|f| sanitize(f.as_ref())).collect())
             .collect();
 
         let column_count = sanitized.iter().map(Vec::len).max().unwrap_or(0);
@@ -325,6 +358,18 @@ mod tests {
             let text = render(format, |o| o.list::<Row, _>(&[], columns).unwrap());
             assert!(text.is_empty(), "{format:?} printed {text:?}");
         }
+    }
+
+    #[test]
+    fn test_details_per_format() {
+        let row = Row { id: 7, name: "x" };
+        let fields = [("ID", Cow::Borrowed("7")), ("Name", Cow::Borrowed("a\tb"))];
+        let human = render(OutputFormat::Human, |o| o.details(&row, &fields).unwrap());
+        assert_eq!(human, "ID    7\nName  a b\n");
+        let tabular = render(OutputFormat::Tabular, |o| o.details(&row, &fields).unwrap());
+        assert_eq!(tabular, "ID\t7\nName\ta b\n");
+        let json = render(OutputFormat::Json, |o| o.details(&row, &fields).unwrap());
+        assert_eq!(json, "{\"id\":7,\"name\":\"x\"}\n");
     }
 
     #[test]

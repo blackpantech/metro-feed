@@ -49,6 +49,15 @@
 //! Autodiscovery fetches a single HTML document, so it uses the 15-second
 //! timeout pinned by the autodiscovery spec instead of the longer one used for
 //! feed downloads.
+//!
+//! # Testing seam
+//!
+//! Callers that orchestrate discovery (such as
+//! [`crate::refresh::subscribe_url`], used by `metro feeds add`) depend on
+//! the [`FeedDiscoverer`] trait rather than on [`discover_feed_url`]
+//! directly (dependency inversion, like `FeedFetcher` for fetching).
+//! [`HttpDiscoverer`] is the production implementation; tests inject mocks
+//! and never hit the network.
 
 use std::time::Duration;
 
@@ -85,6 +94,31 @@ const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Polite User-Agent sent with autodiscovery requests.
 const USER_AGENT: &str = "metro-feed/0.1 (terminal; local-first)";
+
+/// Source of autodiscovery results, abstracted for dependency injection.
+///
+/// The contract is exactly that of [`discover_feed_url`]: return the feed URL
+/// advertised by (or equal to) `homepage_url`, or the documented
+/// [`MetroError`] variants.
+pub trait FeedDiscoverer {
+    /// Resolve `homepage_url` to a feed URL.
+    ///
+    /// # Errors
+    ///
+    /// See [`discover_feed_url`].
+    fn discover(&self, homepage_url: &str) -> Result<String, MetroError>;
+}
+
+/// Production [`FeedDiscoverer`]: performs the HTTP request with
+/// [`discover_feed_url`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HttpDiscoverer;
+
+impl FeedDiscoverer for HttpDiscoverer {
+    fn discover(&self, homepage_url: &str) -> Result<String, MetroError> {
+        discover_feed_url(homepage_url)
+    }
+}
 
 /// Discover a feed URL from a blog homepage.
 ///

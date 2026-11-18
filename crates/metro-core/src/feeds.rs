@@ -21,6 +21,12 @@
 //!   `ON DELETE CASCADE` on `entries.feed_id` removes its entries in the same
 //!   statement. Connections opened through [`crate::db::open`] enforce
 //!   foreign keys, so the cascade is guaranteed.
+//! - **Batch operations**: [`remove_feeds`] and [`move_feeds`] apply one
+//!   operation to several feeds in a single transaction, all-or-nothing (an
+//!   unknown ID changes nothing), ignoring repeated IDs, and return the
+//!   affected feeds as [`FeedInfo`] so frontends can report them without a
+//!   second, racy read. [`remove_feed`] and [`move_feed`] are their
+//!   single-feed forms.
 //! - **Provisional metadata**: the v001 schema requires `title`, `site_url`,
 //!   and `kind` to be `NOT NULL`, but [`add_feed`] only receives a URL, an
 //!   optional title, and an optional folder, and it never touches the
@@ -103,6 +109,7 @@
 //! [`crate::db::migrations::run_migrations`]); the functions in this module
 //! assume the `feeds`, `folders`, and `entries` tables exist.
 
+use std::collections::HashSet;
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -752,26 +759,53 @@ fn query_feeds(
 
 /// Remove a feed and, by cascade, all of its entries.
 ///
+/// Equivalent to [`remove_feeds`] with a single ID.
+///
 /// # Errors
 ///
 /// - [`MetroError::NotFound`] if no feed exists with the given ID.
 /// - [`MetroError::Generic`] if the database delete fails.
 pub fn remove_feed(conn: &mut Connection, id: FeedId) -> Result<(), MetroError> {
+    remove_feeds(conn, &[id]).map(|_| ())
+}
+
+/// Remove several feeds (and, by cascade, their entries) atomically.
+///
+/// All deletions run in one `IMMEDIATE` transaction: either every listed feed
+/// is removed or, when any ID does not exist, none is (`metro feeds remove
+/// f1 f2 f99` must not half-apply). An ID listed more than once is removed
+/// once. An empty slice is a no-op.
+///
+/// Returns what was removed: one [`FeedInfo`] per distinct ID, in argument
+/// order, read inside the transaction just before the deletion (so
+/// `entry_count` is the number of entries deleted with the feed).
+///
+/// # Errors
+///
+/// - [`MetroError::NotFound`] for the first ID (in argument order) that does
+///   not exist; nothing is deleted.
+/// - [`MetroError::Generic`] if the database delete fails or a stored row is
+///   invalid.
+pub fn remove_feeds(conn: &mut Connection, ids: &[FeedId]) -> Result<Vec<FeedInfo>, MetroError> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
-    let deleted = tx.execute("DELETE FROM feeds WHERE id = ?1", params![id.inner()])?;
-    if deleted == 0 {
-        return Err(MetroError::NotFound(format!("feed {id} not found")));
+    let mut removed = Vec::with_capacity(ids.len());
+    for id in unique_ids(ids) {
+        // `get_feed_info` reports a missing feed as `NotFound`; returning
+        // early drops `tx`, which rolls back the deletions made so far.
+        removed.push(get_feed_info(&tx, id)?);
+        tx.execute("DELETE FROM feeds WHERE id = ?1", params![id.inner()])?;
     }
 
     tx.commit()?;
-    Ok(())
+    Ok(removed)
 }
 
 /// Move a feed to another feed folder.
 ///
-/// The target folder must exist and be of kind [`FolderKind::Feeds`]; moving
-/// a feed into the saved-items namespace is rejected.
+/// Equivalent to [`move_feeds`] with a single ID. The target folder must
+/// exist and be of kind [`FolderKind::Feeds`]; moving a feed into the
+/// saved-items namespace is rejected.
 ///
 /// # Errors
 ///
@@ -780,27 +814,69 @@ pub fn remove_feed(conn: &mut Connection, id: FeedId) -> Result<(), MetroError> 
 /// - [`MetroError::Generic`] if the database update fails or a stored row is
 ///   invalid.
 pub fn move_feed(conn: &mut Connection, id: FeedId, folder_id: FolderId) -> Result<(), MetroError> {
+    move_feeds(conn, &[id], folder_id).map(|_| ())
+}
+
+/// Move several feeds to one feed folder atomically.
+///
+/// Every feed must exist and the target folder must exist and be of kind
+/// [`FolderKind::Feeds`]. All updates run in one `IMMEDIATE` transaction, so
+/// either every feed is moved or none is. Feeds are checked in argument order
+/// before the folder, matching [`move_feed`]. An ID listed more than once is
+/// moved once; moving a feed into the folder it already lives in succeeds.
+///
+/// Returns one [`FeedInfo`] per distinct ID, in argument order, read after
+/// the move inside the same transaction.
+///
+/// # Errors
+///
+/// - [`MetroError::NotFound`] for the first missing feed, or a missing target
+///   folder; nothing is moved.
+/// - [`MetroError::Usage`] if the target folder is not a feed folder.
+/// - [`MetroError::Generic`] if the database update fails or a stored row is
+///   invalid.
+pub fn move_feeds(
+    conn: &mut Connection,
+    ids: &[FeedId],
+    folder_id: FolderId,
+) -> Result<Vec<FeedInfo>, MetroError> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
-    let existing_id: Option<i64> = tx
-        .query_row(
-            "SELECT id FROM feeds WHERE id = ?1",
-            params![id.inner()],
-            |row| row.get(0),
-        )
-        .optional()?;
-    if existing_id.is_none() {
-        return Err(MetroError::NotFound(format!("feed {id} not found")));
+    let ids = unique_ids(ids);
+    for id in &ids {
+        let existing_id: Option<i64> = tx
+            .query_row(
+                "SELECT id FROM feeds WHERE id = ?1",
+                params![id.inner()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if existing_id.is_none() {
+            return Err(MetroError::NotFound(format!("feed {id} not found")));
+        }
     }
 
     ensure_feed_folder(&tx, folder_id)?;
 
-    tx.execute(
-        "UPDATE feeds SET folder_id = ?1 WHERE id = ?2",
-        params![folder_id.inner(), id.inner()],
-    )?;
+    let mut moved = Vec::with_capacity(ids.len());
+    for id in &ids {
+        tx.execute(
+            "UPDATE feeds SET folder_id = ?1 WHERE id = ?2",
+            params![folder_id.inner(), id.inner()],
+        )?;
+        moved.push(get_feed_info(&tx, *id)?);
+    }
     tx.commit()?;
-    Ok(())
+    Ok(moved)
+}
+
+/// Return `ids` without repetitions, keeping the first occurrence's order.
+///
+/// Batch operations use it so a repeated argument (`f12 f12`) is not
+/// reported as "not found" the second time round.
+fn unique_ids(ids: &[FeedId]) -> Vec<FeedId> {
+    let mut seen = HashSet::with_capacity(ids.len());
+    ids.iter().copied().filter(|id| seen.insert(*id)).collect()
 }
 
 /// Rename a feed.
@@ -1390,6 +1466,63 @@ mod tests {
             move_feed(&mut conn, outcome.id, saved_id),
             Err(MetroError::Usage(_))
         ));
+    }
+
+    #[test]
+    fn test_remove_feeds_removes_all_and_tolerates_repeats() {
+        let mut conn = test_conn();
+        let one = add_feed(&mut conn, "https://example.com/one.xml", None, None).unwrap();
+        let two = add_feed(&mut conn, "https://example.com/two.xml", None, None).unwrap();
+        let three = add_feed(&mut conn, "https://example.com/three.xml", None, None).unwrap();
+        insert_entry_row(&conn, two.id, "guid-1");
+
+        let removed = remove_feeds(&mut conn, &[one.id, two.id, one.id]).unwrap();
+        let removed: Vec<(FeedId, u64)> = removed.iter().map(|f| (f.id, f.entry_count)).collect();
+        assert_eq!(removed, vec![(one.id, 0), (two.id, 1)]);
+
+        let remaining: Vec<FeedId> = list_feeds(&conn, None)
+            .unwrap()
+            .iter()
+            .map(Feed::id)
+            .collect();
+        assert_eq!(remaining, vec![three.id]);
+        assert_eq!(row_count(&conn, "entries"), 0);
+        // An empty batch is a no-op.
+        assert!(remove_feeds(&mut conn, &[]).unwrap().is_empty());
+        assert_eq!(row_count(&conn, "feeds"), 1);
+    }
+
+    #[test]
+    fn test_remove_feeds_is_all_or_nothing() {
+        let mut conn = test_conn();
+        let one = add_feed(&mut conn, "https://example.com/one.xml", None, None).unwrap();
+
+        let error = remove_feeds(&mut conn, &[one.id, FeedId::new(999)]).unwrap_err();
+
+        assert!(matches!(error, MetroError::NotFound(_)));
+        assert!(error.to_string().contains("f999"), "{error}");
+        assert_eq!(row_count(&conn, "feeds"), 1);
+    }
+
+    #[test]
+    fn test_move_feeds_moves_all_or_nothing() {
+        let mut conn = test_conn();
+        let target = create_folder(&mut conn, "Target", FolderKind::Feeds).unwrap();
+        let one = add_feed(&mut conn, "https://example.com/one.xml", None, None).unwrap();
+        let two = add_feed(&mut conn, "https://example.com/two.xml", None, None).unwrap();
+
+        let error = move_feeds(&mut conn, &[one.id, FeedId::new(999)], target).unwrap_err();
+        assert!(matches!(error, MetroError::NotFound(_)));
+        assert!(list_feeds(&conn, Some(target)).unwrap().is_empty());
+
+        let moved = move_feeds(&mut conn, &[one.id, two.id, two.id], target).unwrap();
+        assert_eq!(moved.len(), 2);
+        assert!(
+            moved
+                .iter()
+                .all(|f| f.folder_id == target && f.folder_name == "Target")
+        );
+        assert_eq!(list_feeds(&conn, Some(target)).unwrap().len(), 2);
     }
 
     #[test]
