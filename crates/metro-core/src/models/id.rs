@@ -378,20 +378,20 @@ mod tests {
 
     #[test]
     fn test_id_json_roundtrip() {
-        fn roundtrip<T>(id: T, expected: &str)
+        fn roundtrip<T>(id: &T, expected: &str)
         where
             T: Serialize + for<'de> Deserialize<'de> + PartialEq + fmt::Debug,
         {
-            let json = serde_json::to_string(&id).unwrap();
+            let json = serde_json::to_string(id).unwrap();
             assert_eq!(json, expected);
             let parsed: T = serde_json::from_str(&json).unwrap();
-            assert_eq!(parsed, id);
+            assert_eq!(&parsed, id);
         }
 
-        roundtrip(FeedId(12), "\"f12\"");
-        roundtrip(FolderId(3), "\"fo3\"");
-        roundtrip(EntryId(4031), "\"e4031\"");
-        roundtrip(SavedItemId(3), "\"s3\"");
+        roundtrip(&FeedId(12), "\"f12\"");
+        roundtrip(&FolderId(3), "\"fo3\"");
+        roundtrip(&EntryId(4031), "\"e4031\"");
+        roundtrip(&SavedItemId(3), "\"s3\"");
     }
 
     #[test]

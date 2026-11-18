@@ -187,7 +187,7 @@ mod tests {
             url: "https://example.com/post/1".to_string(),
             title: "Example Post".to_string(),
             author: Some("John Doe".to_string()),
-            published: Some(1767225600),
+            published: Some(1_767_225_600),
             summary: Some("A brief summary".to_string()),
             content: Some("Full content here".to_string()),
             is_read: false,
@@ -196,9 +196,9 @@ mod tests {
         // Verify all required fields are present
         assert_eq!(entry.id.0, 100);
         assert_eq!(entry.feed_id.0, 5);
-        assert!(!entry.guid.is_empty());
-        assert!(!entry.url.is_empty());
-        assert!(!entry.title.is_empty());
+        assert_ne!(entry.guid, "");
+        assert_ne!(entry.url, "");
+        assert_ne!(entry.title, "");
         assert!(entry.author.is_some());
         assert!(entry.published.is_some());
         assert!(entry.summary.is_some());
@@ -249,8 +249,8 @@ mod tests {
         entry.set_author(Some("Jane Doe".to_string()));
         assert_eq!(entry.author(), Some("Jane Doe"));
 
-        entry.set_published(Some(1234567890));
-        assert_eq!(entry.published(), Some(1234567890));
+        entry.set_published(Some(1_234_567_890));
+        assert_eq!(entry.published(), Some(1_234_567_890));
 
         entry.set_summary(Some("Summary text".to_string()));
         assert_eq!(entry.summary(), Some("Summary text"));
@@ -268,7 +268,7 @@ mod tests {
             url: "https://example.com/post/1".to_string(),
             title: "Example Post Title".to_string(),
             author: Some("Jane Doe".to_string()),
-            published: Some(1767225600),
+            published: Some(1_767_225_600),
             summary: Some("A brief summary of the post".to_string()),
             content: Some("The full content of the post goes here.".to_string()),
             is_read: false,

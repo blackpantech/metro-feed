@@ -83,7 +83,7 @@ mod tests {
         };
         // Verify all required fields are present
         assert_eq!(folder.id.0, 42);
-        assert!(!folder.name.is_empty());
+        assert_ne!(folder.name, "");
         assert!(matches!(folder.kind, FolderKind::Feeds | FolderKind::Saved));
     }
 

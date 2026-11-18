@@ -364,10 +364,9 @@ mod tests {
         assert_eq!(guids(&entries), ["a"]);
         // A feed without entries is an empty list, not an error.
         let empty = feed(&mut conn, "https://three.example.com/feed.xml");
-        assert!(
-            list_feed_entries(&conn, empty, &EntryFilter::default())
-                .unwrap()
-                .is_empty()
+        assert_eq!(
+            list_feed_entries(&conn, empty, &EntryFilter::default()).unwrap(),
+            []
         );
     }
 

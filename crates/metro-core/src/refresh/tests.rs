@@ -181,7 +181,7 @@ fn test_zero_concurrency_is_usage_error() {
     .unwrap_err();
 
     assert!(matches!(error, MetroError::Usage(_)));
-    assert!(fetcher.calls().is_empty());
+    assert_eq!(fetcher.calls(), []);
 }
 
 #[test]
@@ -709,7 +709,7 @@ fn test_unknown_target_feed_is_not_found() {
     .unwrap_err();
 
     assert!(matches!(error, MetroError::NotFound(_)));
-    assert!(fetcher.calls().is_empty());
+    assert_eq!(fetcher.calls(), []);
 }
 
 // ---------------------------------------------------------------------------
@@ -940,7 +940,7 @@ fn test_explicitly_targeted_feed_in_backoff_is_skipped() {
     )
     .unwrap();
 
-    assert!(fetcher.calls().is_empty());
+    assert_eq!(fetcher.calls(), []);
     assert_eq!(report.skipped.len(), 1);
 }
 
@@ -954,7 +954,7 @@ fn test_feed_past_backoff_is_fetched() {
     let report = refresh_all(&mut conn, &fetcher);
 
     assert_eq!(fetcher.calls().len(), 1);
-    assert!(report.skipped.is_empty());
+    assert_eq!(report.skipped, []);
     assert_eq!(feed_state(&conn, id).next_retry, None);
 }
 
@@ -991,7 +991,7 @@ fn test_failure_backoff_follows_schedule_and_caps() {
         let report = refresh_all(&mut conn, &failing);
         let after = now_unix();
 
-        assert!(report.skipped.is_empty());
+        assert_eq!(report.skipped, []);
         let state = feed_state(&conn, id);
         assert_eq!(
             state.consecutive_failures,
@@ -1297,7 +1297,7 @@ fn test_zero_prune_window_is_usage_error_before_fetching() {
     .unwrap_err();
 
     assert!(matches!(error, MetroError::Usage(_)));
-    assert!(fetcher.calls().is_empty());
+    assert_eq!(fetcher.calls(), []);
     assert_eq!(row_count(&conn, "entries"), 1);
 }
 

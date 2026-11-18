@@ -632,7 +632,7 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(error, MetroError::NotFound(_)));
-        assert!(fetcher.calls().is_empty());
+        assert_eq!(fetcher.calls(), []);
     }
 
     #[test]
@@ -644,7 +644,7 @@ mod tests {
         assert!(matches!(blank, Err(MetroError::Usage(_))));
         let bad_url = subscribe_feed(&mut conn, &fetcher, "ftp://x", None, None, false);
         assert!(matches!(bad_url, Err(MetroError::Usage(_))));
-        assert!(fetcher.calls().is_empty());
+        assert_eq!(fetcher.calls(), []);
     }
 
     /// A discoverer answering from a closure and recording its inputs.
@@ -654,11 +654,19 @@ mod tests {
     }
 
     /// Discovery result of a direct feed URL serving [`atom_result`].
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "mock responder: must match the fallible `Fn(&str) -> Result<_, MetroError>` signature the mock takes"
+    )]
     fn direct_feed(_url: &str) -> Result<Discovery, MetroError> {
         Ok(Discovery::Feed(atom_result()))
     }
 
     /// Discovery result of a page advertising [`ATOM_URL`].
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "mock responder: must match the fallible `Fn(&str) -> Result<_, MetroError>` signature the mock takes"
+    )]
     fn page_linking_atom(_url: &str) -> Result<Discovery, MetroError> {
         Ok(Discovery::Link(ATOM_URL.to_string()))
     }
@@ -786,7 +794,7 @@ mod tests {
         };
         assert_eq!(feed.url, ATOM_URL);
         assert_eq!(feed.entry_count, 2);
-        assert!(fetcher.calls().is_empty());
+        assert_eq!(fetcher.calls(), []);
         assert_eq!(row_count(&conn, "feeds"), 0);
         assert_eq!(row_count(&conn, "folders"), 0);
     }
@@ -827,7 +835,7 @@ mod tests {
             1,
             "duplicate must not be requested"
         );
-        assert!(fetcher.calls().is_empty());
+        assert_eq!(fetcher.calls(), []);
     }
 
     #[test]
@@ -885,8 +893,8 @@ mod tests {
         );
         assert!(matches!(folder, Err(MetroError::NotFound(_))));
 
-        assert!(discoverer.calls().is_empty());
-        assert!(fetcher.calls().is_empty());
+        assert_eq!(discoverer.calls(), Vec::<String>::new());
+        assert_eq!(fetcher.calls(), []);
     }
 
     #[test]
@@ -902,7 +910,7 @@ mod tests {
         let missing = subscribe_url(&mut conn, &no_feed, &fetcher, homepage, None, None, false);
         assert_eq!(missing.unwrap_err().exit_code(), 3);
 
-        assert!(fetcher.calls().is_empty());
+        assert_eq!(fetcher.calls(), []);
         assert_eq!(row_count(&conn, "feeds"), 0);
         assert_eq!(row_count(&conn, "folders"), 0);
     }

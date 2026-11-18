@@ -614,6 +614,7 @@ fn non_blank(value: Option<String>) -> Option<String> {
 mod tests {
     use super::*;
 
+    use std::fmt::Write as _;
     use std::io::{BufRead, BufReader, Write};
     use std::net::{TcpListener, TcpStream};
     use std::sync::mpsc;
@@ -758,7 +759,7 @@ mod tests {
             reply.body.len()
         );
         for (name, value) in &reply.headers {
-            out.push_str(&format!("{name}: {value}\r\n"));
+            write!(out, "{name}: {value}\r\n").unwrap();
         }
         out.push_str("\r\n");
         out.push_str(&reply.body);
@@ -841,7 +842,7 @@ mod tests {
         assert_eq!(result.status, FetchStatus::NotModified);
         assert!(result.is_not_modified());
         assert!(result.feed.is_none());
-        assert!(result.entries.is_empty());
+        assert_eq!(result.entries, []);
         assert_eq!(result.etag.as_deref(), Some("\"v1\""));
         assert_eq!(
             result.last_modified.as_deref(),
@@ -1205,6 +1206,6 @@ mod tests {
             <item><title>No guid</title><link>https://example.com/a</link></item>
             </channel></rss>"#;
         let (_, entries) = parse_feed(rss.as_bytes(), None).unwrap();
-        assert!(!entries[0].guid.is_empty());
+        assert_ne!(entries[0].guid, "");
     }
 }

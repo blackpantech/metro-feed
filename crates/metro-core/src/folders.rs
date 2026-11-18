@@ -798,7 +798,7 @@ mod tests {
         let feeds = list_folders(&conn, FolderKind::Feeds).unwrap();
         assert_eq!(feeds.len(), 1);
         assert_eq!(feeds[0].name(), DEFAULT_FOLDER_NAME);
-        assert!(list_folders(&conn, FolderKind::Saved).unwrap().is_empty());
+        assert_eq!(list_folders(&conn, FolderKind::Saved).unwrap(), []);
     }
 
     #[test]

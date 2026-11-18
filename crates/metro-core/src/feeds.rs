@@ -1028,7 +1028,7 @@ pub const BACKOFF_SCHEDULE: [Duration; 6] = [
 ///
 /// assert_eq!(backoff_delay(0), None);
 /// assert_eq!(backoff_delay(1), Some(Duration::from_secs(60)));
-/// assert_eq!(backoff_delay(42), Some(Duration::from_secs(24 * 60 * 60)));
+/// assert_eq!(backoff_delay(42), Some(Duration::from_hours(24)));
 /// ```
 #[must_use]
 pub fn backoff_delay(consecutive_failures: u32) -> Option<Duration> {
@@ -1331,7 +1331,7 @@ mod tests {
     #[test]
     fn test_list_feeds_empty() {
         let conn = test_conn();
-        assert!(list_feeds(&conn, None).unwrap().is_empty());
+        assert_eq!(list_feeds(&conn, None).unwrap(), []);
     }
 
     #[test]
@@ -1383,11 +1383,7 @@ mod tests {
         assert_eq!(feeds[0].folder_id(), first);
 
         // Unknown folder filters yield an empty list.
-        assert!(
-            list_feeds(&conn, Some(FolderId::new(999)))
-                .unwrap()
-                .is_empty()
-        );
+        assert_eq!(list_feeds(&conn, Some(FolderId::new(999))).unwrap(), []);
     }
 
     #[test]
@@ -1501,7 +1497,7 @@ mod tests {
         assert_eq!(remaining, vec![three.id]);
         assert_eq!(row_count(&conn, "entries"), 0);
         // An empty batch is a no-op.
-        assert!(remove_feeds(&mut conn, &[]).unwrap().is_empty());
+        assert_eq!(remove_feeds(&mut conn, &[]).unwrap(), []);
         assert_eq!(row_count(&conn, "feeds"), 1);
     }
 
@@ -1526,7 +1522,7 @@ mod tests {
 
         let error = move_feeds(&mut conn, &[one.id, FeedId::new(999)], target).unwrap_err();
         assert!(matches!(error, MetroError::NotFound(_)));
-        assert!(list_feeds(&conn, Some(target)).unwrap().is_empty());
+        assert_eq!(list_feeds(&conn, Some(target)).unwrap(), []);
 
         let moved = move_feeds(&mut conn, &[one.id, two.id, two.id], target).unwrap();
         assert_eq!(moved.len(), 2);
@@ -1663,7 +1659,7 @@ mod tests {
 
     #[test]
     fn test_backoff_delay_caps_at_24_hours() {
-        let cap = Some(Duration::from_secs(24 * 60 * 60));
+        let cap = Some(Duration::from_hours(24));
         for failures in [6, 7, 10, 100, u32::MAX] {
             assert_eq!(backoff_delay(failures), cap, "failures = {failures}");
         }

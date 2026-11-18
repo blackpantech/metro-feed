@@ -343,7 +343,7 @@ mod tests {
         insert_entry(&conn, feed, "read", Some(NOW - 60 * DAY), Some(NOW), true);
 
         assert_eq!(prune_entries_at(&mut conn, 30, NOW).unwrap(), 2);
-        assert!(remaining(&conn).is_empty());
+        assert_eq!(remaining(&conn), Vec::<String>::new());
     }
 
     #[test]
