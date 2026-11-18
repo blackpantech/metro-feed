@@ -86,7 +86,7 @@ use metro_core::refresh::{FeedFetcher, FeedPreview, SubscribeOutcome, subscribe_
 use rusqlite::Connection;
 use serde::Serialize;
 
-use crate::output::Output;
+use crate::output::{Output, format_timestamp, plural};
 
 /// Arguments of `metro feeds`.
 #[derive(Debug, Args)]
@@ -427,31 +427,6 @@ fn info(conn: &Connection, output: &mut Output<'_>, id: FeedId) -> Result<(), Me
     output.details(&feed, &fields)
 }
 
-/// Format Unix seconds as an RFC 3339 UTC timestamp
-/// (`2026-01-02T00:00:00Z`), falling back to the raw number when it is out
-/// of the representable range.
-fn format_timestamp(seconds: u64) -> String {
-    i64::try_from(seconds)
-        .ok()
-        .and_then(|seconds| jiff::Timestamp::from_second(seconds).ok())
-        .map_or_else(|| seconds.to_string(), |timestamp| timestamp.to_string())
-}
-
-/// Pick the singular or plural form of a noun for `count`.
-///
-/// Generic over the count type so both `usize` fetch counts and `u64`
-/// database counts can be passed without casts.
-fn plural<'a, N>(count: N, singular: &'a str, plural: &'a str) -> &'a str
-where
-    N: TryInto<u64>,
-{
-    if count.try_into().ok() == Some(1) {
-        singular
-    } else {
-        plural
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use clap::Parser;
@@ -575,20 +550,6 @@ mod tests {
         ] {
             assert_eq!(parse_error_code(args), 2, "args {args:?}");
         }
-    }
-
-    #[test]
-    fn test_format_timestamp() {
-        assert_eq!(format_timestamp(0), "1970-01-01T00:00:00Z");
-        assert_eq!(format_timestamp(1_767_312_000), "2026-01-02T00:00:00Z");
-        assert_eq!(format_timestamp(u64::MAX), u64::MAX.to_string());
-    }
-
-    #[test]
-    fn test_plural() {
-        assert_eq!(plural(1_usize, "entry", "entries"), "entry");
-        assert_eq!(plural(0_u64, "entry", "entries"), "entries");
-        assert_eq!(plural(2_u64, "entry", "entries"), "entries");
     }
 }
 

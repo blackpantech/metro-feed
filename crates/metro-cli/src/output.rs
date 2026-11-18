@@ -12,9 +12,13 @@
 //! Commands never format by hand: they hand records to [`Output::list`] (a
 //! list of serializable records plus a function turning one record into its
 //! text columns), [`Output::outcome`] (one serializable result plus its
-//! human message), or [`Output::details`] (one serializable record plus its
-//! labelled fields, for `info`-style commands), so every command family gets
-//! the same contract for free.
+//! human message), [`Output::details`] (one serializable record plus its
+//! labelled fields, for `info`-style commands), or [`Output::report`] (one
+//! serializable record shown to people as detail rows plus a summary line,
+//! for `refresh`), so every command family gets the same contract for free.
+//!
+//! The text helpers [`format_timestamp`] and [`plural`] are shared by the
+//! command modules so dates and counts read the same everywhere.
 //!
 //! # Safety of displayed text
 //!
@@ -83,6 +87,33 @@ pub fn sanitize(text: &str) -> Cow<'_, str> {
 /// Map a write failure to the core error type (exit code 1).
 pub fn write_error(err: &std::io::Error) -> MetroError {
     MetroError::Generic(format!("failed to write output: {err}"))
+}
+
+/// Format Unix seconds as an RFC 3339 UTC timestamp
+/// (`2026-01-02T00:00:00Z`), falling back to the raw number when it is out
+/// of the representable range.
+#[must_use]
+pub fn format_timestamp(seconds: u64) -> String {
+    i64::try_from(seconds)
+        .ok()
+        .and_then(|seconds| jiff::Timestamp::from_second(seconds).ok())
+        .map_or_else(|| seconds.to_string(), |timestamp| timestamp.to_string())
+}
+
+/// Pick the singular or plural form of a noun for `count`.
+///
+/// Generic over the count type so both `usize` fetch counts and `u64`
+/// database counts can be passed without casts.
+#[must_use]
+pub fn plural<'a, N>(count: N, singular: &'a str, plural: &'a str) -> &'a str
+where
+    N: TryInto<u64>,
+{
+    if count.try_into().ok() == Some(1) {
+        singular
+    } else {
+        plural
+    }
 }
 
 /// Writer adapter that silently discards output once the reader has gone
@@ -202,6 +233,34 @@ impl<'w> Output<'w> {
             OutputFormat::Tabular => rows.iter().try_for_each(|row| self.tabular_line(row)),
             OutputFormat::Human => self.aligned_rows(&rows),
         }
+    }
+
+    /// Render a command report: a single serializable record that, for
+    /// people, reads as a few detail rows followed by a summary line
+    /// (`refresh`: one row per failed or skipped feed, then the totals).
+    ///
+    /// - JSON: `record` serialized as one line (`rows` and `message` are
+    ///   not printed; the record must carry the same information).
+    /// - Human: `rows` with aligned columns, then `message`.
+    /// - Tabular: `rows` tab-separated, then `message`.
+    ///
+    /// Rows and message are sanitized like list columns.
+    ///
+    /// # Errors
+    ///
+    /// [`MetroError::Generic`] if serialization or writing fails.
+    pub fn report<T: Serialize>(
+        &mut self,
+        record: &T,
+        rows: &[Vec<String>],
+        message: &str,
+    ) -> Result<(), MetroError> {
+        match self.format {
+            OutputFormat::Json => return self.json_line(record),
+            OutputFormat::Tabular => rows.iter().try_for_each(|row| self.tabular_line(row))?,
+            OutputFormat::Human => self.aligned_rows(rows)?,
+        }
+        writeln!(self.writer, "{}", sanitize(message)).map_err(|e| write_error(&e))
     }
 
     /// Write one compact JSON object followed by a newline.
@@ -373,11 +432,50 @@ mod tests {
     }
 
     #[test]
+    fn test_report_per_format() {
+        let row = Row { id: 7, name: "x" };
+        let rows = vec![
+            vec!["f1".to_string(), "failed".to_string()],
+            vec!["f10".to_string(), "a\tb".to_string()],
+        ];
+        let human = render(OutputFormat::Human, |o| {
+            o.report(&row, &rows, "done").unwrap();
+        });
+        assert_eq!(human, "f1   failed\nf10  a b\ndone\n");
+        let tabular = render(OutputFormat::Tabular, |o| {
+            o.report(&row, &rows, "done").unwrap();
+        });
+        assert_eq!(tabular, "f1\tfailed\nf10\ta b\ndone\n");
+        let json = render(OutputFormat::Json, |o| {
+            o.report(&row, &rows, "done").unwrap()
+        });
+        assert_eq!(json, "{\"id\":7,\"name\":\"x\"}\n");
+        let empty = render(OutputFormat::Human, |o| {
+            o.report(&row, &[], "done").unwrap()
+        });
+        assert_eq!(empty, "done\n");
+    }
+
+    #[test]
     fn test_outcome_message_vs_json() {
         let row = Row { id: 7, name: "x" };
         let human = render(OutputFormat::Human, |o| o.outcome(&row, "done\n").unwrap());
         assert_eq!(human, "done \n");
         let json = render(OutputFormat::Json, |o| o.outcome(&row, "done").unwrap());
         assert_eq!(json, "{\"id\":7,\"name\":\"x\"}\n");
+    }
+
+    #[test]
+    fn test_format_timestamp() {
+        assert_eq!(format_timestamp(0), "1970-01-01T00:00:00Z");
+        assert_eq!(format_timestamp(1_767_312_000), "2026-01-02T00:00:00Z");
+        assert_eq!(format_timestamp(u64::MAX), u64::MAX.to_string());
+    }
+
+    #[test]
+    fn test_plural() {
+        assert_eq!(plural(1_usize, "entry", "entries"), "entry");
+        assert_eq!(plural(0_u64, "entry", "entries"), "entries");
+        assert_eq!(plural(2_u64, "entry", "entries"), "entries");
     }
 }

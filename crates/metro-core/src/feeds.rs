@@ -417,7 +417,7 @@ fn folder_id_from_row_id(row_id: i64) -> Result<FolderId, MetroError> {
 ///
 /// Negative timestamps are rejected as database corruption because the model
 /// represents timestamps as `u64`.
-fn timestamp_from_row(value: Option<i64>) -> Result<Option<u64>, MetroError> {
+pub(crate) fn timestamp_from_row(value: Option<i64>) -> Result<Option<u64>, MetroError> {
     value
         .map(|timestamp| {
             u64::try_from(timestamp).map_err(|_| {

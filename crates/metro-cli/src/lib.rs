@@ -8,8 +8,12 @@
 //!
 //! - [`Cli`] / [`Commands`]: the argument model. Global flags live on
 //!   [`Cli`]; each command family is one [`Commands`] variant whose argument
-//!   types and handler live in their own module (`feeds`, `folders`, later
-//!   `refresh`), each exposing `run(args, conn, output)`.
+//!   types and handler live in their own module (`feeds`, `folders`,
+//!   `refresh` for `refresh` and `view`), each exposing a handler taking
+//!   `(args, conn, output)`.
+//! - stderr carries errors and, for `refresh` only, a progress line drawn
+//!   when stderr is a terminal and `--json` is off; stdout only carries
+//!   results.
 //! - `database`: opens the migrated database (`--db` override or the
 //!   platform default), delegating to `metro_core::db`.
 //! - `output`: the human / tab-separated / NDJSON renderings every command
@@ -35,11 +39,13 @@ use metro_core::MetroError;
 use crate::feeds::FeedsArgs;
 use crate::folders::FoldersArgs;
 use crate::output::{IgnoreBrokenPipe, Output, OutputFormat, write_error};
+use crate::refresh::{RefreshArgs, ViewArgs, run_refresh, run_view};
 
 mod database;
 mod feeds;
 mod folders;
 mod output;
+mod refresh;
 
 /// Metro feed manager
 #[derive(Debug, Parser)]
@@ -74,6 +80,10 @@ pub enum Commands {
     Feeds(FeedsArgs),
     /// Manage feed and saved-item folders
     Folders(FoldersArgs),
+    /// Fetch every feed, or only the given feeds or folder, in parallel
+    Refresh(RefreshArgs),
+    /// List a feed's entries, newest first
+    View(ViewArgs),
 }
 
 /// Run the CLI with the full argv (including the program name) and return
@@ -96,22 +106,41 @@ pub fn run(args: &[String]) -> i32 {
     let stdout = std::io::stdout();
     let stdout_is_terminal = stdout.is_terminal();
     let mut out = IgnoreBrokenPipe::new(stdout.lock());
-    let mut err = std::io::stderr().lock();
-    execute(&cli, &mut out, &mut err, stdout_is_terminal)
+    // stderr is not locked for the whole run: the refresh progress line is
+    // written from a helper thread through its own handle, which would
+    // deadlock on a lock held here. `Stderr` is unbuffered, so the two
+    // handles never interleave partial lines.
+    let mut err = std::io::stderr();
+    let mut progress = std::io::stderr();
+    let progress: Option<&mut (dyn Write + Send)> = if progress.is_terminal() {
+        Some(&mut progress)
+    } else {
+        None
+    };
+    execute(&cli, &mut out, &mut err, stdout_is_terminal, progress)
 }
 
 /// Execute parsed arguments, writing results to `out` and errors to `err`,
 /// and return the exit code.
 ///
-/// Separated from [`run`] so tests can capture both streams and choose the
+/// `progress` is where long-running commands may draw progress (stderr when
+/// it is a terminal, else `None`); it is only used when `--json` is off.
+///
+/// Separated from [`run`] so tests can capture every stream and choose the
 /// terminal/pipe rendering.
-fn execute(cli: &Cli, out: &mut dyn Write, err: &mut dyn Write, stdout_is_terminal: bool) -> i32 {
+fn execute(
+    cli: &Cli,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+    stdout_is_terminal: bool,
+    progress: Option<&mut (dyn Write + Send)>,
+) -> i32 {
     let result = match &cli.command {
         // `metro <global flags>` without a command: show the top-level help.
         None => write!(out, "{}", Cli::command().render_help()).map_err(|e| write_error(&e)),
         Some(command) => {
             let format = OutputFormat::select(cli.json, stdout_is_terminal);
-            dispatch(cli, command, &mut Output::new(out, format))
+            dispatch(cli, command, &mut Output::new(out, format), progress)
         }
     }
     .and_then(|()| out.flush().map_err(|e| write_error(&e)));
@@ -131,7 +160,12 @@ fn execute(cli: &Cli, out: &mut dyn Write, err: &mut dyn Write, stdout_is_termin
 /// Each arm opens the database only if the command needs it, then hands the
 /// family's arguments, the connection and the shared output to the family
 /// module's `run`.
-fn dispatch(cli: &Cli, command: &Commands, output: &mut Output<'_>) -> Result<(), MetroError> {
+fn dispatch(
+    cli: &Cli,
+    command: &Commands,
+    output: &mut Output<'_>,
+    progress: Option<&mut (dyn Write + Send)>,
+) -> Result<(), MetroError> {
     match command {
         Commands::Feeds(args) => {
             let mut conn = database::open(cli.db.as_deref())?;
@@ -140,6 +174,16 @@ fn dispatch(cli: &Cli, command: &Commands, output: &mut Output<'_>) -> Result<()
         Commands::Folders(args) => {
             let mut conn = database::open(cli.db.as_deref())?;
             folders::run(args, &mut conn, output)
+        }
+        Commands::Refresh(args) => {
+            let mut conn = database::open(cli.db.as_deref())?;
+            // `--json` output is for machines: no progress noise at all.
+            let progress = progress.filter(|_| !cli.json);
+            run_refresh(args, &mut conn, output, progress)
+        }
+        Commands::View(args) => {
+            let conn = database::open(cli.db.as_deref())?;
+            run_view(args, &conn, output)
         }
     }
 }
@@ -214,13 +258,31 @@ mod tests {
     }
 
     #[test]
+    fn test_refresh_and_view_help_work() {
+        for (command, flags) in [
+            ("refresh", &["--folder", "--jobs", "FEED_ID"][..]),
+            ("view", &["--all", "--unread", "--limit", "FEED_ID"][..]),
+        ] {
+            let err = Cli::try_parse_from(["metro", command, "--help"]).unwrap_err();
+            assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+            assert_eq!(err.exit_code(), 0);
+            let help = err.to_string();
+            for flag in flags {
+                assert!(help.contains(flag), "missing {flag} in:\n{help}");
+            }
+        }
+    }
+
+    #[test]
     fn test_no_subcommand_prints_help() {
         let cli = Cli::try_parse_from(["metro", "-v"]).unwrap();
         let (mut out, mut err) = (Vec::new(), Vec::new());
-        assert_eq!(execute(&cli, &mut out, &mut err, false), 0);
+        assert_eq!(execute(&cli, &mut out, &mut err, false, None), 0);
         let out = String::from_utf8(out).unwrap();
         assert!(out.contains("folders"), "{out}");
         assert!(out.contains("feeds"), "{out}");
+        assert!(out.contains("refresh"), "{out}");
+        assert!(out.contains("view"), "{out}");
         assert!(err.is_empty());
     }
 
@@ -265,7 +327,7 @@ mod end_to_end_tests {
             .chain(args.iter().copied());
         let cli = Cli::try_parse_from(argv).unwrap();
         let (mut out, mut err) = (Vec::new(), Vec::new());
-        let code = execute(&cli, &mut out, &mut err, false);
+        let code = execute(&cli, &mut out, &mut err, false, None);
         Run {
             code,
             out: String::from_utf8(out).unwrap(),
@@ -299,9 +361,23 @@ mod end_to_end_tests {
 
     /// A local HTTP server answering `connections` requests by path, so
     /// `feeds add` runs its real autodiscovery and fetch code without the
-    /// internet. Routes are `(path, content type, body)`; unknown paths get
-    /// a 404. Returns the base URL (`http://127.0.0.1:<port>`).
+    /// internet. Routes are `(path, content type, body)` served with
+    /// `200 OK`; unknown paths get a 404. Returns the base URL
+    /// (`http://127.0.0.1:<port>`).
     fn serve(routes: Vec<(&'static str, &'static str, String)>, connections: usize) -> String {
+        let routes = routes
+            .into_iter()
+            .map(|(path, content_type, body)| (path, "200 OK", content_type, body))
+            .collect();
+        serve_with_status(routes, connections)
+    }
+
+    /// [`serve`] with an explicit status line per route:
+    /// `(path, status, content type, body)`.
+    fn serve_with_status(
+        routes: Vec<(&'static str, &'static str, &'static str, String)>,
+        connections: usize,
+    ) -> String {
         use std::io::{BufRead, BufReader};
         use std::net::TcpListener;
 
@@ -320,10 +396,10 @@ mod end_to_end_tests {
                     }
                 }
                 let path = request_line.split_whitespace().nth(1).unwrap_or("");
-                let route = routes.iter().find(|(p, _, _)| *p == path);
+                let route = routes.iter().find(|(p, _, _, _)| *p == path);
                 let (status, content_type, body) = route.map_or(
                     ("404 Not Found", "text/plain", ""),
-                    |(_, content_type, body)| ("200 OK", *content_type, body.as_str()),
+                    |(_, status, content_type, body)| (*status, *content_type, body.as_str()),
                 );
                 let _ = write!(
                     stream,
@@ -464,6 +540,122 @@ mod end_to_end_tests {
             .code,
             3
         );
+    }
+
+    /// Subscribe to `urls` without network access (core `add_feed`), so a
+    /// refresh can then hit feeds that would fail at `feeds add` time.
+    fn add_feeds_offline(db: &TempDb, urls: &[String]) {
+        let mut conn = metro_core::db::open_migrated(&db.0).unwrap();
+        for url in urls {
+            metro_core::feeds::add_feed(&mut conn, url, None, None).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_refresh_and_view_exit_codes_end_to_end() {
+        let db = TempDb(temp_db_path());
+        // First refresh: 3 requests; second refresh: only the healthy feed
+        // is due again (the failing ones are in backoff): 1 request.
+        let base = serve_with_status(
+            vec![
+                ("/feed.xml", "200 OK", "application/rss+xml", rss()),
+                (
+                    "/error.xml",
+                    "500 Internal Server Error",
+                    "text/plain",
+                    "boom".to_string(),
+                ),
+            ],
+            4,
+        );
+        add_feeds_offline(
+            &db,
+            &[
+                format!("{base}/feed.xml"),
+                format!("{base}/error.xml"),
+                format!("{base}/missing.xml"),
+            ],
+        );
+
+        // Some feeds fail: report on stdout, error on stderr, exit 5.
+        let run = metro(&db, &["refresh", "--jobs", "2"]);
+        assert_eq!(run.code, 5, "{}", run.err);
+        let lines: Vec<&str> = run.out.lines().collect();
+        assert_eq!(lines.len(), 3, "{}", run.out);
+        assert!(lines[0].starts_with("f2\tfailed\t"), "{}", run.out);
+        assert!(lines[1].starts_with("f3\tfailed\t"), "{}", run.out);
+        assert_eq!(
+            lines[2],
+            "Refreshed 3 feeds: 1 ok, 2 failed, 0 skipped; 1 new entry, 0 pruned"
+        );
+        assert_eq!(
+            run.err,
+            "metro: Partial success: 2 of 3 feeds failed to refresh\n"
+        );
+
+        // The healthy feed's entry is listed.
+        let run = metro(&db, &["view", "f1"]);
+        assert_eq!(run.code, 0, "{}", run.err);
+        assert_eq!(run.out, format!("e1\t-\tunread\tOne\t{base}/1\n"),);
+        let run = metro(&db, &["--json", "view", "f1", "--unread"]);
+        let value: serde_json::Value = serde_json::from_str(run.out.trim_end()).unwrap();
+        assert_eq!(value["guid"], "g1");
+        assert_eq!(metro(&db, &["view", "f2"]).out, "");
+
+        // Failed feeds are now in backoff: skipped, not failures, exit 0.
+        let run = metro(&db, &["--json", "refresh"]);
+        assert_eq!(run.code, 0, "{}", run.err);
+        let value: serde_json::Value = serde_json::from_str(run.out.trim_end()).unwrap();
+        assert_eq!(value["fetched"], 1);
+        assert_eq!(value["skipped"], 2);
+        assert!(run.err.is_empty(), "{}", run.err);
+
+        // Usage and not-found errors.
+        assert_eq!(metro(&db, &["view", "f9"]).code, 3);
+        assert_eq!(metro(&db, &["view", "f1", "--limit", "0"]).code, 2);
+        assert_eq!(metro(&db, &["refresh", "f9"]).code, 3);
+        assert_eq!(metro(&db, &["refresh", "--folder", "Ghost"]).code, 3);
+        assert_eq!(metro(&db, &["refresh", "--jobs", "0"]).code, 2);
+    }
+
+    #[test]
+    fn test_refresh_all_feeds_failing_exits_1_end_to_end() {
+        let db = TempDb(temp_db_path());
+        let base = serve_with_status(
+            vec![(
+                "/error.xml",
+                "500 Internal Server Error",
+                "text/plain",
+                "boom".to_string(),
+            )],
+            2,
+        );
+        add_feeds_offline(
+            &db,
+            &[format!("{base}/error.xml"), format!("{base}/missing.xml")],
+        );
+
+        let run = metro(&db, &["refresh"]);
+        assert_eq!(run.code, 1, "{}", run.err);
+        assert_eq!(
+            run.err,
+            "metro: Generic error: all 2 feeds failed to refresh\n"
+        );
+        assert!(
+            run.out.ends_with(
+                "Refreshed 2 feeds: 0 ok, 2 failed, 0 skipped; 0 new entries, 0 pruned\n"
+            ),
+            "{}",
+            run.out
+        );
+    }
+
+    #[test]
+    fn test_refresh_without_feeds_exits_0_end_to_end() {
+        let db = TempDb(temp_db_path());
+        let run = metro(&db, &["refresh"]);
+        assert_eq!(run.code, 0, "{}", run.err);
+        assert!(run.out.starts_with("Refreshed 0 feeds"), "{}", run.out);
     }
 
     #[test]
