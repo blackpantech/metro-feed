@@ -14,9 +14,10 @@ use rusqlite::{Connection, params};
 use crate::MetroError;
 use crate::db::migrations::run_migrations;
 use crate::db::open_in_memory;
-use crate::fetch::{FeedMetadata, FetchResult, FetchStatus, FetchedEntry};
+use crate::feed_sync::FeedFetcher;
+use crate::http::client::{FetchResult, FetchStatus};
 use crate::models::{FeedId, FeedKind};
-use crate::refresh::FeedFetcher;
+use crate::parse::{FeedMetadata, FetchedEntry};
 
 /// One recorded call to [`MockFetcher::fetch`].
 #[derive(Debug, Clone, PartialEq, Eq)]

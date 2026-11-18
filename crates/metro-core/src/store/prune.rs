@@ -4,7 +4,7 @@
 //! `feeds.window_days` (spec: 30 days by default) are deleted. In M1 the
 //! window is not read from the config file yet (config wiring is planned for
 //! M4); callers pass it explicitly and [`DEFAULT_WINDOW_DAYS`] is the
-//! documented default. [`crate::refresh::refresh_feeds`] runs pruning after
+//! documented default. [`crate::feed_sync::refresh_feeds`] runs pruning after
 //! every refresh (pruning spec: "Pruning runs after refresh").
 //!
 //! # Which date decides an entry's age
@@ -29,12 +29,12 @@
 //! # Out-of-window entries are never inserted
 //!
 //! The same cutoff also gates **insertion**: the refresh writer and
-//! [`crate::refresh::subscribe_feed`] skip a fetched entry whose effective
+//! [`crate::feed_sync::subscribe_feed`] skip a fetched entry whose effective
 //! date (`published`, else the insertion time, i.e. "now") is outside the
 //! window ([`is_outside_window`]), so an entry that a prune would delete
 //! straight away is never stored. Feeds that keep old items in their
 //! documents therefore no longer inflate `new_entries` and `pruned` on every
-//! refresh: [`crate::refresh::RefreshReport::pruned`] only counts entries
+//! refresh: [`crate::feed_sync::RefreshReport::pruned`] only counts entries
 //! that were stored while inside the window and have since aged out. An
 //! undated entry counts as "now" and is always inserted.
 //!
@@ -218,8 +218,8 @@ mod tests {
 
     use crate::db::migrations::run_migrations;
     use crate::db::open_in_memory;
-    use crate::feeds::add_feed;
     use crate::models::FeedId;
+    use crate::store::feeds::add_feed;
 
     /// Synthetic "now": 2026-03-01T00:00:00Z.
     const NOW: i64 = 1_772_323_200;

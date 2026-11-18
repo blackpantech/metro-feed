@@ -40,7 +40,7 @@
 //!   workers and [`refresh_feeds`] returns the error.
 //! - **Backoff** (D6): a failure sets `next_retry` to the failure time plus
 //!   the exponential delay for the feed's new `consecutive_failures` value
-//!   ([`crate::feeds::next_retry_at`]: 1m, 5m, 30m, 2h, 12h, 24h max). Feeds
+//!   ([`backoff::next_retry_at`]: 1m, 5m, 30m, 2h, 12h, 24h max). Feeds
 //!   whose `next_retry` lies in the future are not fetched (not even when
 //!   targeted explicitly) and are listed in [`RefreshReport::skipped`]; a
 //!   success resets the counter and clears the deadline.
@@ -50,7 +50,7 @@
 //!   [`RefreshEvent::FeedFinished`] per fetched feed in completion order.
 //!   Progress is advisory: a dropped receiver never fails the refresh.
 //! - **Pruning** (pruning spec): once every fetched feed has been persisted,
-//!   [`crate::prune::prune_entries`] deletes entries older than
+//!   [`crate::store::prune::prune_entries`] deletes entries older than
 //!   [`RefreshOptions::prune_window_days`] (default
 //!   [`DEFAULT_WINDOW_DAYS`], 30). It runs whenever the refresh completes,
 //!   including partial failure, all feeds failing, or nothing being due, and
@@ -77,6 +77,7 @@
 //!
 //! The CLI maps [`RefreshReport::exit_status`] to process exit codes.
 
+pub mod backoff;
 mod dedup;
 mod subscribe;
 mod writer;
@@ -94,11 +95,11 @@ use std::thread;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use crate::MetroError;
-use crate::feeds::feed_id_from_row_id;
-use crate::fetch::{FetchResult, Fetcher};
+use crate::db::rows::feed_id_from_row_id;
+use crate::feed_sync::writer::{now_unix, store_refresh_failure, store_refresh_success};
+use crate::http::client::{FetchResult, Fetcher};
 use crate::models::{FeedId, FolderId};
-use crate::prune::{DEFAULT_WINDOW_DAYS, prune_before, window_cutoff};
-use crate::refresh::writer::{now_unix, store_refresh_failure, store_refresh_success};
+use crate::store::prune::{DEFAULT_WINDOW_DAYS, prune_before, window_cutoff};
 
 pub use subscribe::{FeedPreview, SubscribeOutcome, subscribe_feed, subscribe_url};
 
@@ -145,7 +146,7 @@ pub enum RefreshTarget<'a> {
     /// Every subscribed feed.
     All,
     /// Every feed in one folder (an unknown folder yields no feeds, like
-    /// [`crate::feeds::list_feeds`]).
+    /// [`crate::store::feeds::list_feeds`]).
     Folder(FolderId),
     /// Specific feeds. Duplicate IDs are refreshed once; an unknown ID fails
     /// the whole call with [`MetroError::NotFound`] before anything is

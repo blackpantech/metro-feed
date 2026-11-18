@@ -7,13 +7,13 @@ use std::time::Duration;
 
 use rusqlite::params;
 
-use crate::feeds::{add_feed, move_feed, rename_feed};
-use crate::fetch::FetchedEntry;
-use crate::folders::create_folder;
-use crate::models::{FeedKind, FolderKind};
-use crate::refresh::test_support::{
+use crate::feed_sync::test_support::{
     MockFetcher, entry, entry_count, modified, not_modified, recent_published, row_count, test_conn,
 };
+use crate::models::{FeedKind, FolderKind};
+use crate::parse::FetchedEntry;
+use crate::store::feeds::{add_feed, move_feed, rename_feed};
+use crate::store::folders::create_folder;
 
 /// Subscribe `count` feeds with provisional metadata; returns their IDs.
 fn add_feeds(conn: &mut Connection, count: usize) -> Vec<FeedId> {

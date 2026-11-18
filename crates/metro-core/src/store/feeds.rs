@@ -14,7 +14,7 @@
 //! - **Folder assignment**: feeds always live in a folder of kind
 //!   [`FolderKind::Feeds`]. When no folder is supplied, [`add_feed`] assigns
 //!   the idempotent default `Unsorted` folder via
-//!   [`crate::folders::ensure_default`]. Adding or moving a feed into a
+//!   [`crate::store::folders::ensure_default`]. Adding or moving a feed into a
 //!   `Saved` folder is rejected because the two folder namespaces are
 //!   separate.
 //! - **Cascade deletion**: [`remove_feed`] deletes the feed row; the schema's
@@ -45,55 +45,10 @@
 //!
 //!   [`add_feed`] is the network-free building block for offline and import
 //!   paths. Interactive subscription (`metro feeds add`) goes through
-//!   [`crate::refresh::subscribe_feed`] instead, which fetches the feed first
+//!   [`crate::feed_sync::subscribe_feed`] instead, which fetches the feed first
 //!   and inserts the real metadata and initial entries in one transaction
 //!   (design decision D11), so its rows never carry placeholders except the
 //!   host title when the feed declares none.
-//!
-//! # URL normalization
-//!
-//! [`normalize_url`] applies the normalization pinned by the spec:
-//!
-//! 1. the scheme and host are lowercased (paths and user info are
-//!    case-sensitive and preserved),
-//! 2. fragments (`#...`) are dropped,
-//! 3. tracking query parameters are dropped (any `utm_*` key plus the
-//!    well-known click IDs listed in [`TRACKING_PARAM_KEYS`]),
-//! 4. remaining query parameters keep their original order and encoding,
-//! 5. trailing slashes are stripped from the path (`https://example.com/`
-//!    becomes `https://example.com`).
-//!
-//! Only absolute `http://` and `https://` URLs are accepted; anything else is
-//! rejected with [`MetroError::Usage`] so the caller can report a clear
-//! message. Default ports are intentionally left in place: they are harmless
-//! for deduplication and removing them would diverge from the specified
-//! normalization rules.
-//!
-//! # Backoff schedule
-//!
-//! A feed whose fetch fails is not retried on every refresh: the refresh
-//! writer stores a `next_retry` deadline computed by [`next_retry_at`] and
-//! the refresh pipeline skips the feed until that deadline has passed
-//! (`backoff` spec, design decision D6). The delay depends only on the
-//! feed's `consecutive_failures` counter **after** it was incremented for
-//! the current failure, and grows along [`BACKOFF_SCHEDULE`]:
-//!
-//! | `consecutive_failures` | delay before the next attempt |
-//! |---|---|
-//! | 0 | none (the feed is healthy) |
-//! | 1 | 1 minute |
-//! | 2 | 5 minutes |
-//! | 3 | 30 minutes |
-//! | 4 | 2 hours |
-//! | 5 | 12 hours |
-//! | 6 or more | 24 hours (cap) |
-//!
-//! The delay is relative to the failure time, so a stale deadline left by a
-//! long offline period resolves naturally on the next run (design risk
-//! table). A failing feed is never deleted automatically; only the counter
-//! and the deadline change, and a success resets both. These functions are
-//! pure (no clock, no database) so the schedule is unit-testable in
-//! isolation.
 //!
 //! # Concurrency
 //!
@@ -111,25 +66,15 @@
 
 use std::collections::HashSet;
 use std::str::FromStr;
-use std::time::Duration;
 
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 
 use crate::MetroError;
-use crate::folders::ensure_default;
+use crate::db::rows::{feed_id_from_row_id, folder_id_from_row_id, timestamp_from_row};
 use crate::models::{Feed, FeedId, FeedKind, FolderId, FolderKind};
-
-/// Well-known query parameter keys that identify tracking clicks rather than
-/// feed content.
-///
-/// Any key that starts with `utm_` is treated as tracking as well. Keys are
-/// compared case-insensitively. The list is deliberately conservative:
-/// parameters that may influence the served feed (for example `format` or
-/// `lang`) are preserved.
-const TRACKING_PARAM_KEYS: &[&str] = &[
-    "fbclid", "gclid", "dclid", "msclkid", "yclid", "igshid", "mc_cid", "mc_eid", "_ga", "_gl",
-];
+use crate::store::folders::ensure_default;
+use crate::url::{UrlOrigin, normalize_url, url_origin};
 
 /// Result of [`add_feed`].
 ///
@@ -182,252 +127,6 @@ pub struct FeedInfo {
     pub last_error_at: Option<u64>,
     /// Number of entries currently stored for the feed.
     pub entry_count: u64,
-}
-
-/// Parsed components of an absolute `http(s)` URL.
-///
-/// Borrows slices of the input string so normalization can rebuild the URL
-/// without allocations per component. IPv6 hosts are stored without their
-/// surrounding brackets.
-struct ParsedUrl<'a> {
-    /// Original scheme spelling (`http` or `https`, any casing).
-    scheme: &'a str,
-    /// User info (everything before the last `@`), preserved verbatim.
-    userinfo: Option<&'a str>,
-    /// Host without brackets, original casing.
-    host: &'a str,
-    /// Explicit port, if present.
-    port: Option<&'a str>,
-    /// Path portion including its leading slash, or an empty string.
-    path: &'a str,
-    /// Query portion without `?`, or `None` when there is no query.
-    query: Option<&'a str>,
-}
-
-impl<'a> ParsedUrl<'a> {
-    /// Parse an absolute `http(s)` URL.
-    ///
-    /// Fragments are ignored. Returns [`MetroError::Usage`] for empty input,
-    /// unsupported schemes, missing hosts, and malformed authorities.
-    fn parse(raw: &'a str) -> Result<Self, MetroError> {
-        let input = raw.trim();
-        if input.is_empty() {
-            return Err(MetroError::Usage("feed URL must not be empty".to_string()));
-        }
-
-        let (scheme, rest) = input.split_once("://").ok_or_else(|| {
-            MetroError::Usage(format!(
-                "invalid feed URL {input:?}: expected an absolute http:// or https:// URL"
-            ))
-        })?;
-        if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
-            return Err(MetroError::Usage(format!(
-                "unsupported URL scheme {scheme:?}: only http and https feed URLs are supported"
-            )));
-        }
-
-        // A fragment never affects the resource that is fetched.
-        let rest = rest.split('#').next().unwrap_or_default();
-
-        let authority_end = rest.find(['/', '?']).unwrap_or(rest.len());
-        let authority = &rest[..authority_end];
-        if authority.is_empty() {
-            return Err(MetroError::Usage(format!(
-                "invalid feed URL {input:?}: the URL has no host"
-            )));
-        }
-
-        let remainder = &rest[authority_end..];
-        let (path, query) = match remainder.split_once('?') {
-            Some((path, query)) => (path, Some(query)),
-            None => (remainder, None),
-        };
-
-        let (userinfo, host_port) = match authority.rsplit_once('@') {
-            Some((userinfo, host_port)) => (Some(userinfo), host_port),
-            None => (None, authority),
-        };
-        let bracketed = host_port.starts_with('[');
-        let (host, port) = split_host_port(host_port)?;
-        if host.is_empty() {
-            return Err(MetroError::Usage(format!(
-                "invalid feed URL {input:?}: the URL has no host"
-            )));
-        }
-        if host.contains(':') && !bracketed {
-            return Err(MetroError::Usage(format!(
-                "invalid feed URL {input:?}: IPv6 hosts must be enclosed in brackets"
-            )));
-        }
-
-        Ok(Self {
-            scheme,
-            userinfo,
-            host,
-            port,
-            path,
-            query,
-        })
-    }
-
-    /// Rebuild the origin (`scheme://host[:port]`) with a lowercased host.
-    ///
-    /// User info is omitted on purpose: it is not part of a site URL.
-    fn origin(&self) -> String {
-        let mut origin = format!(
-            "{}://{}",
-            self.scheme.to_ascii_lowercase(),
-            self.host_for_url()
-        );
-        if let Some(port) = self.port {
-            origin.push(':');
-            origin.push_str(port);
-        }
-        origin
-    }
-
-    /// The host with ASCII casing folded to lowercase.
-    fn host_lowercase(&self) -> String {
-        self.host.to_ascii_lowercase()
-    }
-
-    /// The lowercased host formatted for inclusion in a URL.
-    ///
-    /// IPv6 literals are wrapped back in brackets; because
-    /// [`ParsedUrl::parse`] stores them without brackets, their presence is
-    /// detected by the embedded colons.
-    fn host_for_url(&self) -> String {
-        let host = self.host_lowercase();
-        if self.host.contains(':') {
-            format!("[{host}]")
-        } else {
-            host
-        }
-    }
-}
-
-/// Split an authority's `host[:port]` portion into host and port.
-///
-/// Supports bracketed IPv6 literals. Rejects empty or non-numeric ports and
-/// unbracketed IPv6 literals so malformed URLs are reported early.
-fn split_host_port(host_port: &str) -> Result<(&str, Option<&str>), MetroError> {
-    if let Some(stripped) = host_port.strip_prefix('[') {
-        let Some((host, rest)) = stripped.split_once(']') else {
-            return Err(MetroError::Usage(format!(
-                "invalid IPv6 host in URL: {host_port:?} is missing a closing bracket"
-            )));
-        };
-        let port = match rest {
-            "" => None,
-            other => match other.strip_prefix(':') {
-                Some(port) if is_valid_port(port) => Some(port),
-                _ => {
-                    return Err(MetroError::Usage(format!(
-                        "invalid port in URL authority {host_port:?}"
-                    )));
-                }
-            },
-        };
-        return Ok((host, port));
-    }
-
-    match host_port.rsplit_once(':') {
-        Some((host, port)) if is_valid_port(port) => Ok((host, Some(port))),
-        Some(_) => Err(MetroError::Usage(format!(
-            "invalid port in URL authority {host_port:?}"
-        ))),
-        None => Ok((host_port, None)),
-    }
-}
-
-/// Return `true` when `port` is a non-empty run of ASCII digits.
-fn is_valid_port(port: &str) -> bool {
-    !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit())
-}
-
-/// Return `true` when a query parameter pair is a tracking parameter.
-///
-/// The key is compared case-insensitively against [`TRACKING_PARAM_KEYS`] and
-/// the `utm_` prefix.
-fn is_tracking_param(pair: &str) -> bool {
-    let key = pair.split_once('=').map_or(pair, |(key, _)| key).trim();
-    let key = key.to_ascii_lowercase();
-    key.starts_with("utm_") || TRACKING_PARAM_KEYS.contains(&key.as_str())
-}
-
-/// Rebuild a query string without tracking parameters, preserving order.
-///
-/// Empty segments (`?`, `a=1&&b=2`) and parameters that become empty after
-/// filtering are dropped. An empty result means the URL has no query.
-fn normalized_query(query: &str) -> String {
-    query
-        .split('&')
-        .filter(|pair| !pair.is_empty() && !is_tracking_param(pair))
-        .collect::<Vec<_>>()
-        .join("&")
-}
-
-/// Normalize a feed URL for storage and duplicate detection.
-///
-/// The normalization rules are documented at the module level. The returned
-/// string is what [`add_feed`] stores, so comparing stored URLs to
-/// [`normalize_url`] output is sufficient for deduplication.
-///
-/// # Errors
-///
-/// Returns [`MetroError::Usage`] when the input is empty, is not an absolute
-/// `http(s)` URL, has no host, or has a malformed port.
-#[must_use = "normalization errors must be handled before using the URL"]
-pub fn normalize_url(raw: &str) -> Result<String, MetroError> {
-    let parsed = ParsedUrl::parse(raw)?;
-
-    let mut normalized = format!("{}://", parsed.scheme.to_ascii_lowercase());
-    if let Some(userinfo) = parsed.userinfo {
-        normalized.push_str(userinfo);
-        normalized.push('@');
-    }
-    normalized.push_str(&parsed.host_for_url());
-    if let Some(port) = parsed.port {
-        normalized.push(':');
-        normalized.push_str(port);
-    }
-    normalized.push_str(parsed.path.trim_end_matches('/'));
-
-    let query = parsed.query.map(normalized_query).unwrap_or_default();
-    if !query.is_empty() {
-        normalized.push('?');
-        normalized.push_str(&query);
-    }
-
-    Ok(normalized)
-}
-
-/// Convert a non-negative SQLite row id into a [`FeedId`].
-pub(crate) fn feed_id_from_row_id(row_id: i64) -> Result<FeedId, MetroError> {
-    u64::try_from(row_id)
-        .map(FeedId::new)
-        .map_err(|_| MetroError::Generic(format!("feed row id {row_id} is out of range")))
-}
-
-/// Convert a non-negative SQLite row id into a [`FolderId`].
-fn folder_id_from_row_id(row_id: i64) -> Result<FolderId, MetroError> {
-    u64::try_from(row_id)
-        .map(FolderId::new)
-        .map_err(|_| MetroError::Generic(format!("folder row id {row_id} is out of range")))
-}
-
-/// Convert an optional SQLite timestamp into an optional Unix timestamp.
-///
-/// Negative timestamps are rejected as database corruption because the model
-/// represents timestamps as `u64`.
-pub(crate) fn timestamp_from_row(value: Option<i64>) -> Result<Option<u64>, MetroError> {
-    value
-        .map(|timestamp| {
-            u64::try_from(timestamp).map_err(|_| {
-                MetroError::Generic(format!("negative timestamp {timestamp} stored in database"))
-            })
-        })
-        .transpose()
 }
 
 /// Parse a stored feed-kind string, reporting corruption with context.
@@ -549,10 +248,10 @@ pub(crate) struct UrlPlaceholders {
 /// Returns [`MetroError::Usage`] if `normalized_url` is not an absolute
 /// `http(s)` URL (it always is when produced by [`normalize_url`]).
 pub(crate) fn url_placeholders(normalized_url: &str) -> Result<UrlPlaceholders, MetroError> {
-    let parsed = ParsedUrl::parse(normalized_url)?;
+    let UrlOrigin { host, origin } = url_origin(normalized_url)?;
     Ok(UrlPlaceholders {
-        title: parsed.host_lowercase(),
-        site_url: parsed.origin(),
+        title: host,
+        site_url: origin,
     })
 }
 
@@ -998,77 +697,12 @@ pub fn get_feed_info(conn: &Connection, id: FeedId) -> Result<FeedInfo, MetroErr
     })
 }
 
-/// Retry delays applied after the 1st, 2nd, … consecutive failure.
-///
-/// Index `n - 1` holds the delay after the `n`-th consecutive failure; any
-/// failure beyond the last element reuses the last element, which is the
-/// 24-hour cap of the `backoff` spec. See the module documentation for the
-/// full table.
-pub const BACKOFF_SCHEDULE: [Duration; 6] = [
-    Duration::from_mins(1),
-    Duration::from_mins(5),
-    Duration::from_mins(30),
-    Duration::from_hours(2),
-    Duration::from_hours(12),
-    Duration::from_hours(24),
-];
-
-/// Delay before a feed with `consecutive_failures` failures may be retried.
-///
-/// Returns `None` for `0` (a healthy feed is never delayed). Otherwise
-/// returns the matching [`BACKOFF_SCHEDULE`] step, capped at its last element
-/// (24 hours) for six or more failures.
-///
-/// # Examples
-///
-/// ```
-/// use std::time::Duration;
-///
-/// use metro_core::feeds::backoff_delay;
-///
-/// assert_eq!(backoff_delay(0), None);
-/// assert_eq!(backoff_delay(1), Some(Duration::from_secs(60)));
-/// assert_eq!(backoff_delay(42), Some(Duration::from_hours(24)));
-/// ```
-#[must_use]
-pub fn backoff_delay(consecutive_failures: u32) -> Option<Duration> {
-    let step = usize::try_from(consecutive_failures.checked_sub(1)?).unwrap_or(usize::MAX);
-    BACKOFF_SCHEDULE
-        .get(step)
-        .or_else(|| BACKOFF_SCHEDULE.last())
-        .copied()
-}
-
-/// Unix timestamp (seconds) at which a failing feed may be fetched again.
-///
-/// `consecutive_failures` is the counter **including** the failure that
-/// happened at `failed_at` (Unix seconds). The result is
-/// `failed_at + backoff_delay(consecutive_failures)`, saturating at
-/// [`i64::MAX`] instead of overflowing. Returns `None` when no delay applies
-/// (`consecutive_failures == 0`), which the refresh writer stores as
-/// `next_retry = NULL` ("due on the next refresh").
-///
-/// # Examples
-///
-/// ```
-/// use metro_core::feeds::next_retry_at;
-///
-/// assert_eq!(next_retry_at(1, 1_000), Some(1_060));
-/// assert_eq!(next_retry_at(0, 1_000), None);
-/// ```
-#[must_use]
-pub fn next_retry_at(consecutive_failures: u32, failed_at: i64) -> Option<i64> {
-    let delay = backoff_delay(consecutive_failures)?;
-    let delay_seconds = i64::try_from(delay.as_secs()).unwrap_or(i64::MAX);
-    Some(failed_at.saturating_add(delay_seconds))
-}
-
 #[cfg(all(test, feature = "test-utils"))]
 mod tests {
     use super::*;
     use crate::db::migrations::run_migrations;
     use crate::db::open_in_memory;
-    use crate::folders::{create_folder, list_folders};
+    use crate::store::folders::{create_folder, list_folders};
 
     /// Open a migrated in-memory database for feed tests.
     fn test_conn() -> Connection {
@@ -1097,103 +731,6 @@ mod tests {
             row.get(0)
         })
         .unwrap()
-    }
-
-    #[test]
-    fn test_normalize_url_lowercases_scheme_and_host() {
-        assert_eq!(
-            normalize_url("HTTPS://Example.COM/Feed.xml").unwrap(),
-            "https://example.com/Feed.xml"
-        );
-    }
-
-    #[test]
-    fn test_normalize_url_strips_fragment_and_trailing_slashes() {
-        assert_eq!(
-            normalize_url("https://example.com/#section").unwrap(),
-            "https://example.com"
-        );
-        assert_eq!(
-            normalize_url("https://example.com/feed///").unwrap(),
-            "https://example.com/feed"
-        );
-    }
-
-    #[test]
-    fn test_normalize_url_drops_tracking_params() {
-        assert_eq!(
-            normalize_url(
-                "https://example.com/feed.xml?utm_source=rss&format=rss&fbclid=abc&utm_medium=email"
-            )
-            .unwrap(),
-            "https://example.com/feed.xml?format=rss"
-        );
-    }
-
-    #[test]
-    fn test_normalize_url_preserves_remaining_query_order() {
-        assert_eq!(
-            normalize_url("https://example.com/feed?b=2&a=1&gclid=x").unwrap(),
-            "https://example.com/feed?b=2&a=1"
-        );
-    }
-
-    #[test]
-    fn test_normalize_url_drops_empty_query() {
-        assert_eq!(
-            normalize_url("https://example.com/feed.xml?utm_source=rss").unwrap(),
-            "https://example.com/feed.xml"
-        );
-        assert_eq!(
-            normalize_url("https://example.com/feed.xml?").unwrap(),
-            "https://example.com/feed.xml"
-        );
-    }
-
-    #[test]
-    fn test_normalize_url_preserves_port_and_userinfo() {
-        assert_eq!(
-            normalize_url("https://Example.com:8443/feed/").unwrap(),
-            "https://example.com:8443/feed"
-        );
-        assert_eq!(
-            normalize_url("https://User:Pass@Example.com/feed").unwrap(),
-            "https://User:Pass@example.com/feed"
-        );
-    }
-
-    #[test]
-    fn test_normalize_url_bracketed_ipv6() {
-        assert_eq!(
-            normalize_url("http://[2001:DB8::1]:8080/feed/").unwrap(),
-            "http://[2001:db8::1]:8080/feed"
-        );
-    }
-
-    #[test]
-    fn test_normalize_url_rejects_invalid_input() {
-        assert!(matches!(normalize_url(""), Err(MetroError::Usage(_))));
-        assert!(matches!(normalize_url("   "), Err(MetroError::Usage(_))));
-        assert!(matches!(
-            normalize_url("example.com/feed"),
-            Err(MetroError::Usage(_))
-        ));
-        assert!(matches!(
-            normalize_url("ftp://example.com/feed"),
-            Err(MetroError::Usage(_))
-        ));
-        assert!(matches!(
-            normalize_url("https://"),
-            Err(MetroError::Usage(_))
-        ));
-        assert!(matches!(
-            normalize_url("https://example.com:abc/feed"),
-            Err(MetroError::Usage(_))
-        ));
-        assert!(matches!(
-            normalize_url("https://2001:db8::1/feed"),
-            Err(MetroError::Usage(_))
-        ));
     }
 
     #[test]
@@ -1623,77 +1160,5 @@ mod tests {
             get_feed_info(&conn, FeedId::new(999)),
             Err(MetroError::NotFound(_))
         ));
-    }
-
-    // -----------------------------------------------------------------------
-    // Backoff schedule (task 9.2)
-    // -----------------------------------------------------------------------
-
-    const MINUTE: i64 = 60;
-    const HOUR: i64 = 60 * MINUTE;
-
-    #[test]
-    fn test_backoff_delay_zero_failures_has_no_delay() {
-        assert_eq!(backoff_delay(0), None);
-        assert_eq!(next_retry_at(0, 1_000), None);
-    }
-
-    #[test]
-    fn test_backoff_delay_follows_schedule() {
-        let expected = [
-            (1, MINUTE),
-            (2, 5 * MINUTE),
-            (3, 30 * MINUTE),
-            (4, 2 * HOUR),
-            (5, 12 * HOUR),
-            (6, 24 * HOUR),
-        ];
-        for (failures, seconds) in expected {
-            assert_eq!(
-                backoff_delay(failures).map(|delay| delay.as_secs()),
-                Some(u64::try_from(seconds).unwrap()),
-                "failures = {failures}"
-            );
-        }
-    }
-
-    #[test]
-    fn test_backoff_delay_caps_at_24_hours() {
-        let cap = Some(Duration::from_hours(24));
-        for failures in [6, 7, 10, 100, u32::MAX] {
-            assert_eq!(backoff_delay(failures), cap, "failures = {failures}");
-        }
-    }
-
-    #[test]
-    fn test_backoff_delay_is_monotonic() {
-        let delays: Vec<Duration> = (1..=8).filter_map(backoff_delay).collect();
-        assert_eq!(delays.len(), 8);
-        assert!(delays.windows(2).all(|pair| pair[0] <= pair[1]));
-    }
-
-    #[test]
-    fn test_next_retry_first_failure_is_one_minute_later() {
-        assert_eq!(
-            next_retry_at(1, 1_700_000_000),
-            Some(1_700_000_000 + MINUTE)
-        );
-    }
-
-    #[test]
-    fn test_next_retry_sixth_failure_is_24_hours_later() {
-        assert_eq!(
-            next_retry_at(6, 1_700_000_000),
-            Some(1_700_000_000 + 24 * HOUR)
-        );
-        assert_eq!(
-            next_retry_at(50, 1_700_000_000),
-            Some(1_700_000_000 + 24 * HOUR)
-        );
-    }
-
-    #[test]
-    fn test_next_retry_saturates_instead_of_overflowing() {
-        assert_eq!(next_retry_at(6, i64::MAX - 10), Some(i64::MAX));
     }
 }

@@ -71,14 +71,14 @@ use std::time::{Duration, Instant};
 use jiff::Timestamp;
 use jiff::fmt::rfc2822::DateTimePrinter;
 use metro_core::db;
-use metro_core::entries::{EntryFilter, EntryLimit, ReadFilter, list_feed_entries};
-use metro_core::feeds::{add_feed, list_feeds};
-use metro_core::fetch::{FetchConfig, Fetcher};
-use metro_core::models::{Feed, FeedId, FeedKind};
-use metro_core::prune::DEFAULT_WINDOW_DAYS;
-use metro_core::refresh::{
+use metro_core::feed_sync::{
     DEFAULT_CONCURRENCY, FeedOutcome, RefreshOptions, RefreshReport, RefreshTarget, refresh_feeds,
 };
+use metro_core::http::client::{FetchConfig, Fetcher};
+use metro_core::models::{Feed, FeedId, FeedKind};
+use metro_core::store::entries::{EntryFilter, EntryLimit, ReadFilter, list_feed_entries};
+use metro_core::store::feeds::{add_feed, list_feeds};
+use metro_core::store::prune::DEFAULT_WINDOW_DAYS;
 use metro_core::test_utils::temp_db_path;
 use rusqlite::Connection;
 

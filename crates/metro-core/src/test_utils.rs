@@ -75,7 +75,7 @@ pub fn fixture_path(name: &str) -> PathBuf {
     fixtures_dir().join(name)
 }
 
-/// Read one shared fixture as raw bytes (what [`crate::fetch::parse_feed`]
+/// Read one shared fixture as raw bytes (what [`crate::parse::parse_feed`]
 /// takes), e.g. `load_fixture("atom.xml")`.
 ///
 /// # Errors

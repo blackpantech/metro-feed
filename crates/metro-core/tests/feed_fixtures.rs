@@ -3,7 +3,7 @@
 //! response with feed-rs").
 //!
 //! Each fixture is loaded through [`metro_core::test_utils::load_fixture`] and
-//! parsed with the public [`metro_core::fetch::parse_feed`], exactly as the
+//! parsed with the public [`metro_core::http::client::parse_feed`], exactly as the
 //! fetcher does after a `200` response. No network is involved.
 //!
 //! This target declares `required-features = ["test-utils"]` in
@@ -15,8 +15,8 @@
 //! cross-checked with `date -u -d <rfc3339> +%s`.
 
 use metro_core::MetroError;
-use metro_core::fetch::{FeedMetadata, FetchedEntry, parse_feed};
 use metro_core::models::FeedKind;
+use metro_core::parse::{FeedMetadata, FetchedEntry, parse_feed};
 use metro_core::test_utils::load_fixture;
 
 /// Load and parse a fixture, resolving relative links against `base_uri`.

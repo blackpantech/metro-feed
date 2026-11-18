@@ -2,7 +2,7 @@
 //!
 //! [`subscribe_feed`] subscribes to a known feed URL; `metro feeds add` goes
 //! through [`subscribe_url`], which adds autodiscovery and shares the same
-//! storage steps. Unlike the network-free [`crate::feeds::add_feed`], both
+//! storage steps. Unlike the network-free [`crate::store::feeds::add_feed`], both
 //! fetch the feed **before** writing anything, so:
 //!
 //! - typos and dead URLs fail fast and leave the database untouched;
@@ -51,7 +51,7 @@
 //!    network access.
 //! 2. Request the normalized URL **once** through a [`FeedDiscoverer`],
 //!    which classifies the response by its body, whatever its
-//!    `Content-Type` (see [`crate::discovery`]). Discovery errors are
+//!    `Content-Type` (see [`crate::http::discovery`]). Discovery errors are
 //!    returned as is (`Network` → exit 4, `NotFound` when the body is neither
 //!    a feed nor a page advertising one → exit 3, `Generic` when a response
 //!    served as a feed does not parse → exit 1).
@@ -68,17 +68,18 @@ use rusqlite::{Connection, TransactionBehavior};
 use serde::Serialize;
 
 use crate::MetroError;
-use crate::discovery::{Discovery, FeedDiscoverer};
-use crate::feeds::{
-    NewFeed, ensure_feed_folder, find_feed_by_url, insert_feed, normalize_url, url_placeholders,
+use crate::feed_sync::FeedFetcher;
+use crate::feed_sync::writer::{apply_fetch_success, now_unix};
+use crate::http::client::FetchResult;
+use crate::http::discovery::{Discovery, FeedDiscoverer};
+use crate::models::{FeedId, FeedKind, FolderId};
+use crate::store::feeds::{
+    NewFeed, ensure_feed_folder, find_feed_by_url, insert_feed, url_placeholders,
     validate_explicit_title,
 };
-use crate::fetch::FetchResult;
-use crate::folders::ensure_default;
-use crate::models::{FeedId, FeedKind, FolderId};
-use crate::prune::{DEFAULT_WINDOW_DAYS, window_cutoff};
-use crate::refresh::FeedFetcher;
-use crate::refresh::writer::{apply_fetch_success, now_unix};
+use crate::store::folders::ensure_default;
+use crate::store::prune::{DEFAULT_WINDOW_DAYS, window_cutoff};
+use crate::url::normalize_url;
 
 /// Metadata [`subscribe_feed`] stores (or, in dry-run mode, would store).
 ///
@@ -344,11 +345,11 @@ mod tests {
 
     use rusqlite::params;
 
-    use crate::folders::create_folder;
-    use crate::models::FolderKind;
-    use crate::refresh::test_support::{
+    use crate::feed_sync::test_support::{
         MockFetcher, atom_result, entry, modified, not_modified, row_count, test_conn,
     };
+    use crate::models::FolderKind;
+    use crate::store::folders::create_folder;
 
     const ATOM_URL: &str = "https://atom.example.com/atom.xml";
 

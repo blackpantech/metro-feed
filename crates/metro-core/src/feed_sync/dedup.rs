@@ -31,7 +31,7 @@
 
 use std::borrow::Cow;
 
-use crate::fetch::FetchedEntry;
+use crate::parse::FetchedEntry;
 
 /// Prefix marking keys produced by the content-hash tier.
 const HASH_KEY_PREFIX: &str = "hash:";

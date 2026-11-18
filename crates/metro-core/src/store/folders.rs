@@ -62,6 +62,7 @@ use std::str::FromStr;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
 use crate::MetroError;
+use crate::db::rows::folder_id_from_row_id;
 use crate::models::{Folder, FolderId, FolderKind};
 
 /// Name of the default folder that receives feeds added without an explicit
@@ -109,17 +110,6 @@ fn folder_by_id(conn: &Connection, id: FolderId) -> Result<Folder, MetroError> {
     let (row_id, name, kind_text) =
         row.ok_or_else(|| MetroError::NotFound(format!("folder {id} not found")))?;
     folder_from_columns(row_id, name, &kind_text)
-}
-
-/// Convert a non-negative SQLite row id into a [`FolderId`].
-///
-/// SQLite stores integers as signed 64-bit values while folder IDs are
-/// unsigned. Row ids are always non-negative, so this conversion only fails
-/// on a corrupted database.
-fn folder_id_from_row_id(row_id: i64) -> Result<FolderId, MetroError> {
-    u64::try_from(row_id)
-        .map(FolderId::new)
-        .map_err(|_| MetroError::Generic(format!("folder row id {row_id} is out of range")))
 }
 
 /// Build a [`Folder`] from its stored database columns.

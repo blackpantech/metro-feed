@@ -16,6 +16,7 @@ use rusqlite::Connection;
 use std::path::{Path, PathBuf};
 
 pub mod migrations;
+pub(crate) mod rows;
 
 /// File name of the database inside the data directory.
 pub const DB_FILE_NAME: &str = "metro.db";

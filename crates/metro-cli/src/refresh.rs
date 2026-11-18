@@ -6,15 +6,15 @@
 //! ```
 //!
 //! Both are thin adapters over `metro-core` ("two frontends, one core"):
-//! `refresh` calls `metro_core::refresh::refresh_feeds` and `view` calls
-//! `metro_core::entries::list_feed_entries`. This module only maps flags to
+//! `refresh` calls `metro_core::feed_sync::refresh_feeds` and `view` calls
+//! `metro_core::store::entries::list_feed_entries`. This module only maps flags to
 //! core arguments and renders the results.
 //!
 //! # `refresh`
 //!
 //! - **Target**: every feed by default, the listed feeds (`f12 f13`), or one
 //!   feed folder (`--folder`, resolved in the feed namespace with
-//!   `metro_core::folders::find_folder`). Feed IDs and `--folder` are
+//!   `metro_core::store::folders::find_folder`). Feed IDs and `--folder` are
 //!   mutually exclusive (a usage error, exit 2).
 //! - **Workers**: `--jobs <n>` sets the worker pool size; without it the
 //!   core default (`DEFAULT_CONCURRENCY`, 8) applies. `--jobs 0` is rejected
@@ -78,15 +78,15 @@ use std::thread;
 
 use clap::Args;
 use metro_core::MetroError;
-use metro_core::entries::{EntryFilter, EntryLimit, ReadFilter, list_feed_entries};
-use metro_core::feeds::list_feeds;
-use metro_core::fetch::Fetcher;
-use metro_core::folders::find_folder;
-use metro_core::models::{Entry, FeedId, FolderKind};
-use metro_core::refresh::{
+use metro_core::feed_sync::{
     FeedFetcher, FeedOutcome, RefreshEvent, RefreshOptions, RefreshReport, RefreshTarget,
     refresh_feeds,
 };
+use metro_core::http::client::Fetcher;
+use metro_core::models::{Entry, FeedId, FolderKind};
+use metro_core::store::entries::{EntryFilter, EntryLimit, ReadFilter, list_feed_entries};
+use metro_core::store::feeds::list_feeds;
+use metro_core::store::folders::find_folder;
 use rusqlite::Connection;
 use serde::{Serialize, Serializer};
 
@@ -560,7 +560,7 @@ mod tests {
                     feed_id: FeedId(completed as u64),
                     completed,
                     total: 2,
-                    status: metro_core::refresh::FeedStatus::NotModified,
+                    status: metro_core::feed_sync::FeedStatus::NotModified,
                 })
                 .unwrap();
         }
@@ -596,10 +596,11 @@ mod tests {
 mod command_tests {
     use metro_core::db::migrations::run_migrations;
     use metro_core::db::open_in_memory;
-    use metro_core::feeds::add_feed;
-    use metro_core::fetch::{FeedMetadata, FetchResult, FetchStatus, FetchedEntry};
-    use metro_core::folders::create_folder;
+    use metro_core::http::client::{FetchResult, FetchStatus};
     use metro_core::models::FeedKind;
+    use metro_core::parse::{FeedMetadata, FetchedEntry};
+    use metro_core::store::feeds::add_feed;
+    use metro_core::store::folders::create_folder;
     use rusqlite::params;
 
     use super::*;
