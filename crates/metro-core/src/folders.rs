@@ -28,6 +28,13 @@
 //!   still contains feeds. The v001 schema cascades `feeds` → `entries`
 //!   deletions, so this guard is what prevents a folder deletion from
 //!   silently destroying subscriptions and their entries.
+//! - **Protected default folder**: the default feed folder
+//!   ([`DEFAULT_FOLDER_NAME`] of kind [`DEFAULT_FOLDER_KIND`], created by
+//!   [`ensure_default`]) can be neither deleted nor renamed, so feeds added
+//!   without an explicit folder always land in the same, predictable place.
+//!   [`delete_folder`] and [`rename_folder`] refuse it with the same error
+//!   variant as a non-empty folder deletion. Renaming *another* folder to
+//!   `Unsorted` is only governed by the usual name-conflict rule.
 //!
 //! # Case-insensitivity limitation
 //!
@@ -60,9 +67,49 @@ use crate::models::{Folder, FolderId, FolderKind};
 /// Name of the default folder that receives feeds added without an explicit
 /// folder.
 ///
-/// The default folder is of kind [`FolderKind::Feeds`] and is created
-/// idempotently by [`ensure_default`].
+/// The default folder is of kind [`DEFAULT_FOLDER_KIND`] and is created
+/// idempotently by [`ensure_default`]. It is protected: [`delete_folder`] and
+/// [`rename_folder`] refuse it (see [`is_default_folder`]).
 pub const DEFAULT_FOLDER_NAME: &str = "Unsorted";
+
+/// Kind of the default folder named [`DEFAULT_FOLDER_NAME`].
+///
+/// Only the feed-folder namespace has a default in M1; a saved folder named
+/// `Unsorted` is an ordinary folder. (The saved-items default, `Inbox`,
+/// arrives with M3.)
+pub const DEFAULT_FOLDER_KIND: FolderKind = FolderKind::Feeds;
+
+/// Whether `folder` is the protected default folder.
+///
+/// This is the single definition of "the default folder", shared by
+/// [`ensure_default`] (through [`DEFAULT_FOLDER_NAME`] and
+/// [`DEFAULT_FOLDER_KIND`]) and the deletion/rename guards. The name is
+/// compared ASCII case-insensitively, exactly like SQLite's `lower()` used
+/// by the creation lookup, so whatever casing the stored row has (for
+/// example a user-created `unsorted` that [`ensure_default`] later reused),
+/// it is recognized.
+fn is_default_folder(folder: &Folder) -> bool {
+    folder.kind() == DEFAULT_FOLDER_KIND && folder.name().eq_ignore_ascii_case(DEFAULT_FOLDER_NAME)
+}
+
+/// Load a folder by ID, failing with [`MetroError::NotFound`] if it is absent.
+///
+/// Mutating functions call this inside their `IMMEDIATE` transaction (a
+/// [`Transaction`] derefs to [`Connection`]) so the existence and
+/// default-folder checks are atomic with the write that follows.
+fn folder_by_id(conn: &Connection, id: FolderId) -> Result<Folder, MetroError> {
+    let row: Option<(i64, String, String)> = conn
+        .query_row(
+            "SELECT id, name, kind FROM folders WHERE id = ?1",
+            params![id.inner()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+
+    let (row_id, name, kind_text) =
+        row.ok_or_else(|| MetroError::NotFound(format!("folder {id} not found")))?;
+    folder_from_columns(row_id, name, &kind_text)
+}
 
 /// Convert a non-negative SQLite row id into a [`FolderId`].
 ///
@@ -287,12 +334,17 @@ pub fn list_folders(conn: &Connection, kind: FolderKind) -> Result<Vec<Folder>, 
 /// as a no-op. Renaming fails when another folder of the same kind already
 /// uses the new name (compared case-insensitively, ASCII only).
 ///
+/// The default folder ([`DEFAULT_FOLDER_NAME`]) cannot be renamed, not even
+/// to a differently-cased spelling of its own name. Renaming another folder
+/// *to* `Unsorted` is only subject to the name-conflict rule above.
+///
 /// # Errors
 ///
 /// - [`MetroError::Usage`] if the trimmed new name is empty.
 /// - [`MetroError::NotFound`] if no folder exists with the given ID.
-/// - [`MetroError::Generic`] if the new name conflicts with an existing
-///   folder of the same kind, or if the database update fails.
+/// - [`MetroError::Generic`] if the folder is the default folder, if the new
+///   name conflicts with an existing folder of the same kind, or if the
+///   database update fails.
 pub fn rename_folder(
     conn: &mut Connection,
     id: FolderId,
@@ -302,22 +354,22 @@ pub fn rename_folder(
 
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
-    // The conflict check needs the folder's kind; fetch it first.
-    let kind_text: Option<String> = tx
-        .query_row(
-            "SELECT kind FROM folders WHERE id = ?1",
-            params![id.inner()],
-            |row| row.get(0),
-        )
-        .optional()?;
+    // The default-folder guard and the conflict check need the folder's name
+    // and kind; fetch them inside the transaction.
+    let folder = folder_by_id(&tx, id)?;
 
-    let kind_text =
-        kind_text.ok_or_else(|| MetroError::NotFound(format!("folder {id} not found")))?;
+    if is_default_folder(&folder) {
+        // Dropping the transaction rolls it back; nothing was written.
+        return Err(MetroError::Generic(format!(
+            "cannot rename folder {id}: {:?} is the default folder for new feeds and cannot be renamed",
+            folder.name()
+        )));
+    }
 
     let conflicting_id: Option<i64> = tx
         .query_row(
             "SELECT id FROM folders WHERE kind = ?1 AND lower(name) = lower(?2) AND id != ?3",
-            params![kind_text, new_name, id.inner()],
+            params![folder.kind().as_str(), new_name, id.inner()],
             |row| row.get(0),
         )
         .optional()?;
@@ -343,24 +395,25 @@ pub fn rename_folder(
 /// their entries. Once the saved-items feature lands (M3), saved folders
 /// will gain an equivalent emptiness rule of their own.
 ///
+/// The default folder ([`DEFAULT_FOLDER_NAME`]) is never deleted, even when
+/// empty: it is where feeds added without an explicit folder go.
+///
 /// # Errors
 ///
 /// - [`MetroError::NotFound`] if no folder exists with the given ID.
-/// - [`MetroError::Generic`] if the folder still contains feeds, or if the
-///   database delete fails.
+/// - [`MetroError::Generic`] if the folder is the default folder, if it
+///   still contains feeds, or if the database delete fails.
 pub fn delete_folder(conn: &mut Connection, id: FolderId) -> Result<(), MetroError> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
-    let existing_id: Option<i64> = tx
-        .query_row(
-            "SELECT id FROM folders WHERE id = ?1",
-            params![id.inner()],
-            |row| row.get(0),
-        )
-        .optional()?;
+    let folder = folder_by_id(&tx, id)?;
 
-    if existing_id.is_none() {
-        return Err(MetroError::NotFound(format!("folder {id} not found")));
+    if is_default_folder(&folder) {
+        // Dropping the transaction rolls it back; nothing was written.
+        return Err(MetroError::Generic(format!(
+            "cannot delete folder {id}: {:?} is the default folder for new feeds and cannot be deleted",
+            folder.name()
+        )));
     }
 
     let feed_count: i64 = tx.query_row(
@@ -382,15 +435,17 @@ pub fn delete_folder(conn: &mut Connection, id: FolderId) -> Result<(), MetroErr
 
 /// Ensure the default `Unsorted` folder exists, returning its ID.
 ///
-/// Creates the default folder of kind [`FolderKind::Feeds`] on first use and
+/// Creates the default folder of kind [`DEFAULT_FOLDER_KIND`] on first use and
 /// returns the existing folder's ID on every subsequent call. Callers that
-/// add a feed without an explicit folder use this to obtain the target.
+/// add a feed without an explicit folder use this to obtain the target. The
+/// folder is protected from deletion and renaming (see [`delete_folder`] and
+/// [`rename_folder`]).
 ///
 /// # Errors
 ///
 /// Same as [`create_folder`].
 pub fn ensure_default(conn: &mut Connection) -> Result<FolderId, MetroError> {
-    create_folder(conn, DEFAULT_FOLDER_NAME, FolderKind::Feeds)
+    create_folder(conn, DEFAULT_FOLDER_NAME, DEFAULT_FOLDER_KIND)
 }
 
 #[cfg(all(test, feature = "test-utils"))]
@@ -673,6 +728,101 @@ mod tests {
 
         let folders = list_folders(&conn, FolderKind::Feeds).unwrap();
         assert_eq!(folders.len(), 1);
+    }
+
+    #[test]
+    fn test_delete_default_folder_refused() {
+        let mut conn = test_conn();
+        let id = ensure_default(&mut conn).unwrap();
+
+        // Refused even though it is empty, with the non-empty-deletion variant.
+        let err = delete_folder(&mut conn, id).unwrap_err();
+        assert!(
+            matches!(err, MetroError::Generic(ref msg) if msg.contains("default")),
+            "got {err:?}"
+        );
+        assert_eq!(err.exit_code(), 1);
+
+        let folders = list_folders(&conn, FolderKind::Feeds).unwrap();
+        assert_eq!(folders.len(), 1);
+        assert_eq!(folders[0].id(), id);
+    }
+
+    #[test]
+    fn test_delete_default_folder_refused_with_other_casing() {
+        // A user-created "unsorted" is reused by ensure_default, so it is the
+        // default folder too.
+        let mut conn = test_conn();
+        let id = create_folder(&mut conn, "unsorted", FolderKind::Feeds).unwrap();
+        assert_eq!(ensure_default(&mut conn).unwrap(), id);
+
+        assert!(matches!(
+            delete_folder(&mut conn, id),
+            Err(MetroError::Generic(_))
+        ));
+        assert_eq!(list_folders(&conn, FolderKind::Feeds).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_rename_default_folder_refused() {
+        let mut conn = test_conn();
+        let id = ensure_default(&mut conn).unwrap();
+
+        // Neither a new name nor a re-casing of its own name is allowed.
+        for new_name in ["Inbox", "UNSORTED"] {
+            let err = rename_folder(&mut conn, id, new_name).unwrap_err();
+            assert!(
+                matches!(err, MetroError::Generic(ref msg) if msg.contains("default")),
+                "{new_name}: got {err:?}"
+            );
+        }
+
+        let folders = list_folders(&conn, FolderKind::Feeds).unwrap();
+        assert_eq!(folders.len(), 1);
+        assert_eq!(folders[0].name(), DEFAULT_FOLDER_NAME);
+    }
+
+    #[test]
+    fn test_default_protection_leaves_other_folders_unaffected() {
+        let mut conn = test_conn();
+        ensure_default(&mut conn).unwrap();
+        let tech = create_folder(&mut conn, "Tech", FolderKind::Feeds).unwrap();
+        // A saved folder named "Unsorted" is not the default folder.
+        let saved = create_folder(&mut conn, "Unsorted", FolderKind::Saved).unwrap();
+
+        rename_folder(&mut conn, tech, "Technology").unwrap();
+        delete_folder(&mut conn, tech).unwrap();
+        rename_folder(&mut conn, saved, "Later").unwrap();
+        delete_folder(&mut conn, saved).unwrap();
+
+        let feeds = list_folders(&conn, FolderKind::Feeds).unwrap();
+        assert_eq!(feeds.len(), 1);
+        assert_eq!(feeds[0].name(), DEFAULT_FOLDER_NAME);
+        assert!(list_folders(&conn, FolderKind::Saved).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_rename_other_folder_to_default_name_conflicts() {
+        let mut conn = test_conn();
+        ensure_default(&mut conn).unwrap();
+        let tech = create_folder(&mut conn, "Tech", FolderKind::Feeds).unwrap();
+
+        // Governed by the ordinary conflict rule, not the protection.
+        let err = rename_folder(&mut conn, tech, "unsorted").unwrap_err();
+        assert!(
+            matches!(err, MetroError::Generic(ref msg) if msg.contains("already uses")),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_rename_other_folder_to_default_name_without_default_succeeds() {
+        // Before the default exists, "Unsorted" is a free name; the renamed
+        // folder then becomes the default that ensure_default reuses.
+        let mut conn = test_conn();
+        let tech = create_folder(&mut conn, "Tech", FolderKind::Feeds).unwrap();
+        rename_folder(&mut conn, tech, DEFAULT_FOLDER_NAME).unwrap();
+        assert_eq!(ensure_default(&mut conn).unwrap(), tech);
     }
 
     #[test]
