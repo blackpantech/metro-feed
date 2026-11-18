@@ -144,7 +144,6 @@ rules:
 operations:
   apply:
     guidance:
+      - Unless explicitly said, do not work on more than one task section at a time and stop after every section to keep context small and manageable.
       - Annotate unused code with `#[cfg_attr(not(test),expect(dead_code, reason = "..."))]`.
-      - Finish the development of each commit with `cargo fmt`, `cargo clippy --all-targets -- -D warnings` and `cargo test --workspace`. Fix any issues reported before running the next command.
-      - Finish the development of each feature with `cargo test --workspace --release --features test-utils` and `cargo clippy -- -W clippy::pedantic`. Make all fixes before running the next command.
-      - If integration tests were modified during the development of a commit, run `cargo test --workspace --release --features test-utils`.
+      - Finish the development of each commit by running the "validations-suite" skill.
