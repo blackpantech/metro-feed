@@ -17,9 +17,10 @@
 //!   `Last-Modified` validator, and answers `304 Not Modified` only when the
 //!   request's `If-None-Match` / `If-Modified-Since` matches, so the second
 //!   refresh proves that both validators are stored and sent back;
-//! - dates each feed's entries relative to "now" (1, 10, and 45 days old) so
-//!   pruning has something to delete under both the default 30-day window
-//!   and a 7-day window;
+//! - dates each feed's entries relative to "now" (1, 10, and 45 days old):
+//!   the 45-day-old one is already outside the default 30-day window, so it
+//!   is never inserted, and the 10-day-old one ages out under a 7-day window,
+//!   so pruning has something to delete;
 //! - sleeps [`RESPONSE_DELAY`] per request and records the peak number of
 //!   requests in flight, which shows that feeds are fetched in parallel and
 //!   never by more than the worker pool size.
@@ -74,6 +75,7 @@ use metro_core::entries::{EntryFilter, EntryLimit, ReadFilter, list_feed_entries
 use metro_core::feeds::{add_feed, list_feeds};
 use metro_core::fetch::{FetchConfig, Fetcher};
 use metro_core::models::{Feed, FeedId, FeedKind};
+use metro_core::prune::DEFAULT_WINDOW_DAYS;
 use metro_core::refresh::{
     DEFAULT_CONCURRENCY, FeedOutcome, RefreshOptions, RefreshReport, RefreshTarget, refresh_feeds,
 };
@@ -102,8 +104,18 @@ const DAY: i64 = 86_400;
 ///
 /// - `fresh` survives every window used here;
 /// - `aging` survives the default 30-day window but not a 7-day one;
-/// - `stale` is older than the default 30-day window.
+/// - `stale` is older than the default 30-day window, so it is never
+///   inserted (refresh skips out-of-window entries).
 const ENTRY_AGES: [(&str, i64); 3] = [("fresh", 1), ("aging", 10), ("stale", 45)];
+
+/// Number of [`ENTRY_AGES`] inside the default window, i.e. the entries a
+/// first refresh inserts per feed.
+fn entries_in_default_window() -> usize {
+    ENTRY_AGES
+        .iter()
+        .filter(|(_, age_days)| *age_days < i64::from(DEFAULT_WINDOW_DAYS))
+        .count()
+}
 
 // ---------------------------------------------------------------------------
 // Local HTTP feed server
@@ -558,9 +570,12 @@ fn fifty_feeds_refresh_in_parallel_within_budget() {
     assert_outcomes(
         &harness,
         &report,
-        |outcome| matches!(outcome, FeedOutcome::Updated { new_entries } if *new_entries == ENTRY_AGES.len()),
+        |outcome| matches!(outcome, FeedOutcome::Updated { new_entries } if *new_entries == entries_in_default_window()),
     );
-    assert_eq!(report.new_entries(), FEED_COUNT * ENTRY_AGES.len());
+    assert_eq!(
+        report.new_entries(),
+        FEED_COUNT * entries_in_default_window()
+    );
 
     // Every feed was downloaded exactly once, in parallel, never by more
     // than the worker pool size.
@@ -624,18 +639,23 @@ fn second_refresh_gets_not_modified_via_etag_and_last_modified() {
     }
 }
 
-/// Pruning spec "Pruning runs after refresh": entries outside the window are
-/// deleted after a full refresh, and again after a refresh where every feed
-/// answered 304 (pruning covers all feeds, not only updated ones).
+/// Pruning spec "Pruning runs after refresh": entries already outside the
+/// window are never inserted (so nothing churns), and stored entries that
+/// age out are deleted, also after a refresh where every feed answered 304
+/// (pruning covers all feeds, not only updated ones).
 #[test]
 fn refresh_prunes_entries_outside_the_window() {
     let mut harness = Harness::new();
 
-    // Default 30-day window: the 45-day-old entry of every feed is inserted
-    // and then pruned by the same refresh.
+    // Default 30-day window: the 45-day-old entry of every feed is skipped at
+    // insert time, so it is neither counted as new nor pruned.
     let (first, _) = harness.refresh(None);
     assert!(first.exit_status().is_ok());
-    assert_eq!(first.pruned, FEED_COUNT);
+    assert_eq!(
+        first.new_entries(),
+        FEED_COUNT * entries_in_default_window()
+    );
+    assert_eq!(first.pruned, 0);
     for index in 0..FEED_COUNT {
         assert_eq!(
             harness.guids(index),
@@ -644,8 +664,9 @@ fn refresh_prunes_entries_outside_the_window() {
         );
     }
 
-    // 7-day window on a refresh that downloads nothing: the 10-day-old
-    // entries are still pruned.
+    // 7-day window on a refresh that downloads nothing: the stored
+    // 10-day-old entries have aged out of it and are pruned, and only they
+    // are counted.
     let (second, _) = harness.refresh(Some(7));
     assert_outcomes(&harness, &second, |outcome| {
         matches!(outcome, FeedOutcome::NotModified)

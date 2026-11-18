@@ -26,6 +26,25 @@
 //! its effective date is **strictly before** the cutoff, so an entry exactly
 //! `window_days` old is kept. Entries dated in the future are never pruned.
 //!
+//! # Out-of-window entries are never inserted
+//!
+//! The same cutoff also gates **insertion**: the refresh writer and
+//! [`crate::refresh::subscribe_feed`] skip a fetched entry whose effective
+//! date (`published`, else the insertion time, i.e. "now") is outside the
+//! window ([`is_outside_window`]), so an entry that a prune would delete
+//! straight away is never stored. Feeds that keep old items in their
+//! documents therefore no longer inflate `new_entries` and `pruned` on every
+//! refresh: [`crate::refresh::RefreshReport::pruned`] only counts entries
+//! that were stored while inside the window and have since aged out. An
+//! undated entry counts as "now" and is always inserted.
+//!
+//! Both checks go through [`window_cutoff`], the single place where the
+//! cutoff is computed. A refresh computes it once, from the "now" captured
+//! when the refresh starts, and uses that value for the insert-time skip of
+//! every feed and for its post-refresh prune ([`prune_before`]), so the two
+//! can never disagree within one refresh. A subscription uses
+//! [`DEFAULT_WINDOW_DAYS`].
+//!
 //! # What is (not) exempt
 //!
 //! - **Unread entries are not exempt** (product spec decision 7; pruning
@@ -87,8 +106,22 @@ pub(crate) fn prune_entries_at(
     window_days: u32,
     now: i64,
 ) -> Result<usize, MetroError> {
-    let cutoff = cutoff(window_days, now)?;
+    let cutoff = window_cutoff(window_days, now)?;
+    prune_before(conn, cutoff)
+}
 
+/// Delete every entry whose effective date is strictly before `cutoff`
+/// (Unix seconds, as returned by [`window_cutoff`]).
+///
+/// The refresh pipeline calls this with the cutoff it already used for the
+/// insert-time skip, so pruning and insertion share one cutoff per refresh.
+///
+/// Returns the number of entries deleted.
+///
+/// # Errors
+///
+/// Returns [`MetroError::Generic`] if a database operation fails.
+pub(crate) fn prune_before(conn: &mut Connection, cutoff: i64) -> Result<usize, MetroError> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let deleted = tx.execute(PRUNE_SQL, params![cutoff])?;
     tx.commit()?;
@@ -97,13 +130,10 @@ pub(crate) fn prune_entries_at(
 
 /// Check that `window_days` is usable as a retention window.
 ///
-/// Shared with the refresh pipeline so an invalid window is rejected before
-/// any feed is fetched.
-///
 /// # Errors
 ///
 /// Returns [`MetroError::Usage`] if `window_days` is `0`.
-pub(crate) fn validate_window(window_days: u32) -> Result<(), MetroError> {
+fn validate_window(window_days: u32) -> Result<(), MetroError> {
     if window_days == 0 {
         return Err(MetroError::Usage(
             "the pruning window must be at least 1 day".to_string(),
@@ -112,18 +142,36 @@ pub(crate) fn validate_window(window_days: u32) -> Result<(), MetroError> {
     Ok(())
 }
 
-/// Compute the pruning cutoff (Unix seconds) for `window_days` before `now`.
+/// Compute the window cutoff (Unix seconds) for `window_days` before `now`.
+///
+/// This is the **single source of truth** for the retention cutoff: pruning
+/// ([`prune_entries_at`], [`prune_before`]) and the insert-time skip of the
+/// refresh writer ([`is_outside_window`]) both derive their bound from it.
+/// It also validates the window, so the refresh pipeline calls it before
+/// fetching anything and an invalid window fails fast.
 ///
 /// Saturating arithmetic keeps absurd inputs from overflowing: the result
-/// simply moves towards `i64::MIN`, which prunes nothing.
+/// simply moves towards `i64::MIN`, which prunes (and skips) nothing.
 ///
 /// # Errors
 ///
 /// Returns [`MetroError::Usage`] if `window_days` is `0`.
-fn cutoff(window_days: u32, now: i64) -> Result<i64, MetroError> {
+pub(crate) fn window_cutoff(window_days: u32, now: i64) -> Result<i64, MetroError> {
     validate_window(window_days)?;
     let window_seconds = i64::from(window_days).saturating_mul(SECONDS_PER_DAY);
     Ok(now.saturating_sub(window_seconds))
+}
+
+/// Whether an entry with this effective date (Unix seconds) lies outside
+/// the window ending at `cutoff`.
+///
+/// Mirrors the comparison in `PRUNE_SQL`: outside means **strictly before**
+/// the cutoff, so an entry exactly at the cutoff is inside (kept, and
+/// inserted). The caller supplies the effective date (`published`, else the
+/// insertion time).
+#[must_use]
+pub(crate) fn is_outside_window(effective_date: i64, cutoff: i64) -> bool {
+    effective_date < cutoff
 }
 
 #[cfg(test)]
@@ -132,18 +180,28 @@ mod pure_tests {
 
     #[test]
     fn test_cutoff_is_window_before_now() {
-        assert_eq!(cutoff(30, 3_000_000).unwrap(), 3_000_000 - 30 * 86_400);
-        assert_eq!(cutoff(1, 86_400).unwrap(), 0);
+        assert_eq!(
+            window_cutoff(30, 3_000_000).unwrap(),
+            3_000_000 - 30 * 86_400
+        );
+        assert_eq!(window_cutoff(1, 86_400).unwrap(), 0);
     }
 
     #[test]
     fn test_cutoff_saturates() {
-        assert_eq!(cutoff(u32::MAX, i64::MIN).unwrap(), i64::MIN);
+        assert_eq!(window_cutoff(u32::MAX, i64::MIN).unwrap(), i64::MIN);
+    }
+
+    #[test]
+    fn test_outside_window_is_strictly_before_cutoff() {
+        assert!(is_outside_window(999, 1_000));
+        assert!(!is_outside_window(1_000, 1_000));
+        assert!(!is_outside_window(1_001, 1_000));
     }
 
     #[test]
     fn test_zero_window_is_usage_error() {
-        let error = cutoff(0, 1_000).unwrap_err();
+        let error = window_cutoff(0, 1_000).unwrap_err();
         assert!(matches!(error, MetroError::Usage(_)));
         assert_eq!(error.exit_code(), 2);
     }

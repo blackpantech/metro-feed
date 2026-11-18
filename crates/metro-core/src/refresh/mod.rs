@@ -50,7 +50,7 @@
 //!   [`RefreshEvent::FeedFinished`] per fetched feed in completion order.
 //!   Progress is advisory: a dropped receiver never fails the refresh.
 //! - **Pruning** (pruning spec): once every fetched feed has been persisted,
-//!   [`prune_entries`] deletes entries older than
+//!   [`crate::prune::prune_entries`] deletes entries older than
 //!   [`RefreshOptions::prune_window_days`] (default
 //!   [`DEFAULT_WINDOW_DAYS`], 30). It runs whenever the refresh completes,
 //!   including partial failure, all feeds failing, or nothing being due, and
@@ -58,6 +58,14 @@
 //!   reported in [`RefreshReport::pruned`]. It does not run when the refresh
 //!   aborts with an error (invalid options, unknown target, database error).
 //!   The window is validated before anything is fetched.
+//! - **Out-of-window entries**: the window cutoff is computed
+//!   once per refresh ([`window_cutoff`], from the "now" captured when the
+//!   refresh starts) and shared by the writer and the prune. The writer skips
+//!   fetched entries whose effective date (`published`, else now) is before
+//!   it, so entries already outside the window are never inserted and
+//!   neither [`RefreshReport::new_entries`] nor [`RefreshReport::pruned`]
+//!   counts them; `pruned` only counts stored entries that aged out.
+//!   Undated entries are always inserted.
 //!
 //! # Testing seam
 //!
@@ -89,7 +97,7 @@ use crate::MetroError;
 use crate::feeds::feed_id_from_row_id;
 use crate::fetch::{FetchResult, Fetcher};
 use crate::models::{FeedId, FolderId};
-use crate::prune::{DEFAULT_WINDOW_DAYS, prune_entries, validate_window};
+use crate::prune::{DEFAULT_WINDOW_DAYS, prune_before, window_cutoff};
 use crate::refresh::writer::{now_unix, store_refresh_failure, store_refresh_success};
 
 pub use subscribe::{FeedPreview, SubscribeOutcome, subscribe_feed, subscribe_url};
@@ -153,9 +161,10 @@ pub struct RefreshOptions<'a> {
     pub concurrency: Option<usize>,
     /// Optional channel receiving [`RefreshEvent`]s while the refresh runs.
     pub progress: Option<&'a Sender<RefreshEvent>>,
-    /// Retention window (days) applied by the post-refresh prune; `None`
-    /// means [`DEFAULT_WINDOW_DAYS`] (30, `feeds.window_days`, hardcoded in
-    /// M1). `Some(0)` is a usage error.
+    /// Retention window (days) applied by the post-refresh prune and by the
+    /// insert-time skip of out-of-window entries; `None` means
+    /// [`DEFAULT_WINDOW_DAYS`] (30, `feeds.window_days`, hardcoded in M1).
+    /// `Some(0)` is a usage error.
     pub prune_window_days: Option<u32>,
 }
 
@@ -264,11 +273,15 @@ pub struct RefreshReport {
     /// Feeds skipped because of backoff, sorted by feed ID.
     pub skipped: Vec<SkippedFeed>,
     /// Number of entries deleted by the post-refresh prune (all feeds).
+    ///
+    /// Only stored entries that aged out of the window are counted: fetched
+    /// entries already outside it are never inserted.
     pub pruned: usize,
 }
 
 impl RefreshReport {
-    /// Total number of new entries inserted across all feeds.
+    /// Total number of new entries inserted across all feeds (out-of-window
+    /// entries are not inserted, so they are not counted).
     #[must_use]
     pub fn new_entries(&self) -> usize {
         self.results
@@ -349,9 +362,13 @@ pub fn refresh_feeds<F: FeedFetcher>(
 ) -> Result<RefreshReport, MetroError> {
     let pool_size = resolve_concurrency(options.concurrency)?;
     let window_days = options.prune_window_days.unwrap_or(DEFAULT_WINDOW_DAYS);
-    validate_window(window_days)?;
+    // One "now" and one cutoff for the whole refresh: the insert-time skip
+    // and the post-refresh prune must agree. Also validates the window
+    // before anything is fetched.
+    let now = now_unix();
+    let cutoff = window_cutoff(window_days, now)?;
     let candidates = load_candidates(conn, target)?;
-    let (due, mut skipped) = partition_by_backoff(candidates, now_unix());
+    let (due, mut skipped) = partition_by_backoff(candidates, now);
     let workers = pool_size.min(due.len());
 
     emit(
@@ -363,13 +380,14 @@ pub fn refresh_feeds<F: FeedFetcher>(
         },
     );
 
-    let mut results = run_pool(conn, fetcher, &due, workers, options.progress)?;
+    let mut results = run_pool(conn, fetcher, &due, workers, cutoff, options.progress)?;
     results.sort_by_key(|result| result.feed_id.inner());
     skipped.sort_by_key(|skipped| skipped.feed_id.inner());
 
     // Runs after every entry has been inserted (pruning spec: "Pruning runs
-    // after refresh", also on partial failure).
-    let pruned = prune_entries(conn, window_days)?;
+    // after refresh", also on partial failure), with the cutoff used for the
+    // insert-time skip.
+    let pruned = prune_before(conn, cutoff)?;
 
     Ok(RefreshReport {
         workers,
@@ -524,12 +542,14 @@ struct FetchMessage {
 }
 
 /// Fetch `jobs` on `workers` scoped threads and persist results as they
-/// arrive on the calling thread.
+/// arrive on the calling thread. `cutoff` is the refresh's window cutoff
+/// (entries dated before it are not inserted).
 fn run_pool<F: FeedFetcher>(
     conn: &mut Connection,
     fetcher: &F,
     jobs: &[FeedJob],
     workers: usize,
+    cutoff: i64,
     progress: Option<&Sender<RefreshEvent>>,
 ) -> Result<Vec<FeedRefresh>, MetroError> {
     if jobs.is_empty() {
@@ -562,7 +582,7 @@ fn run_pool<F: FeedFetcher>(
         // worker has finished.
         drop(sender);
 
-        let written = write_results(conn, jobs, &receiver, progress);
+        let written = write_results(conn, jobs, &receiver, cutoff, progress);
         if written.is_err() {
             // Stop handing out jobs; in-flight fetches finish and are
             // discarded when the scope joins the workers.
@@ -628,6 +648,7 @@ fn write_results(
     conn: &mut Connection,
     jobs: &[FeedJob],
     receiver: &Receiver<FetchMessage>,
+    cutoff: i64,
     progress: Option<&Sender<RefreshEvent>>,
 ) -> Result<Vec<FeedRefresh>, MetroError> {
     let total = jobs.len();
@@ -640,7 +661,7 @@ fn write_results(
                 message.index
             ))
         })?;
-        let outcome = persist(conn, job.id, message.fetched)?;
+        let outcome = persist(conn, job.id, message.fetched, cutoff)?;
 
         emit(
             progress,
@@ -663,14 +684,16 @@ fn write_results(
 /// Persist one fetch outcome and classify it.
 ///
 /// Fetch errors and "feed removed meanwhile" become [`FeedOutcome::Failed`];
-/// only database errors propagate.
+/// only database errors propagate. Entries dated before `cutoff` are not
+/// inserted.
 fn persist(
     conn: &mut Connection,
     feed_id: FeedId,
     fetched: Result<FetchResult, MetroError>,
+    cutoff: i64,
 ) -> Result<FeedOutcome, MetroError> {
     match fetched {
-        Ok(result) => match store_refresh_success(conn, feed_id, &result) {
+        Ok(result) => match store_refresh_success(conn, feed_id, &result, cutoff) {
             Ok(new_entries) if result.is_not_modified() => {
                 debug_assert_eq!(new_entries, 0, "a 304 carries no entries");
                 Ok(FeedOutcome::NotModified)

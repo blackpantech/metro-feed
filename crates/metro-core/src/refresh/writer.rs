@@ -18,7 +18,7 @@
 //! | `last_fetch` | now (D6) | now (D6) |
 //! | `error_state` | cleared | cleared |
 //! | `consecutive_failures`, `next_retry` | reset to `0` / `NULL` | reset to `0` / `NULL` |
-//! | entries | inserted with dedup | none |
+//! | entries | inserted with dedup, out-of-window ones skipped | none |
 //!
 //! # What a failed fetch records
 //!
@@ -42,6 +42,19 @@
 //! the guard is served by the `idx_entries_feed_url` index on
 //! `entries(feed_id, url)`.
 //!
+//! # Out-of-window entries
+//!
+//! A fetched entry whose effective date (`published`, else now) is strictly
+//! before the window cutoff is **not inserted** and not counted in the
+//! returned number of new entries (`prune::is_outside_window`). The cutoff
+//! is computed by the caller with `prune::window_cutoff` (the refresh
+//! pipeline from its prune window, `subscribe_feed` from the default
+//! window), so the skip and the post-refresh prune always agree: an entry
+//! the prune would delete immediately is never stored, and
+//! `RefreshReport::pruned` only counts entries that aged out. Undated
+//! entries count as "now" and are always inserted; so are entries dated in
+//! the future.
+//!
 //! New entries get `first_seen = now` (the pruning fallback when `published`
 //! is missing), `is_read = 0`, and an empty `url` / `title` when the feed
 //! omits them (both columns are `NOT NULL`).
@@ -52,6 +65,7 @@ use crate::MetroError;
 use crate::feeds::next_retry_at;
 use crate::fetch::{FetchResult, FetchStatus};
 use crate::models::FeedId;
+use crate::prune::is_outside_window;
 use crate::refresh::dedup::{dedup_key, entry_url};
 
 /// Insert one entry unless its key or (non-empty) URL is already stored for
@@ -75,7 +89,9 @@ pub(crate) fn now_unix() -> i64 {
 /// Persist a successful refresh fetch in its own `IMMEDIATE` transaction.
 ///
 /// The parsed feed title (if any) is offered as the title candidate, so it
-/// is applied only on the feed's first successful fetch (D10).
+/// is applied only on the feed's first successful fetch (D10). Entries
+/// dated before `cutoff` (Unix seconds, from `prune::window_cutoff`) are
+/// skipped; see the module documentation.
 ///
 /// Returns the number of new entries inserted.
 ///
@@ -88,11 +104,13 @@ pub(crate) fn store_refresh_success(
     conn: &mut Connection,
     feed_id: FeedId,
     result: &FetchResult,
+    cutoff: i64,
 ) -> Result<usize, MetroError> {
     let title_candidate = result.feed.as_ref().and_then(|feed| feed.title.as_deref());
 
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let new_entries = apply_fetch_success(&tx, feed_id, result, title_candidate, now_unix())?;
+    let new_entries =
+        apply_fetch_success(&tx, feed_id, result, title_candidate, now_unix(), cutoff)?;
     tx.commit()?;
     Ok(new_entries)
 }
@@ -107,6 +125,11 @@ pub(crate) fn store_refresh_success(
 /// and only when it is not blank. `subscribe_feed` passes `None` because it
 /// already inserted the final title.
 ///
+/// `now` (Unix seconds) is written to `last_fetch` and to the new entries'
+/// `first_seen`, and is the effective date of undated entries. Entries whose
+/// effective date is before `cutoff` (from `prune::window_cutoff`) are not
+/// inserted.
+///
 /// Returns the number of new entries inserted. The caller commits.
 ///
 /// # Errors
@@ -119,6 +142,7 @@ pub(crate) fn apply_fetch_success(
     result: &FetchResult,
     title_candidate: Option<&str>,
     now: i64,
+    cutoff: i64,
 ) -> Result<usize, MetroError> {
     let title_candidate = title_candidate
         .map(str::trim)
@@ -181,27 +205,36 @@ pub(crate) fn apply_fetch_success(
         )));
     }
 
-    insert_entries(tx, feed_id, result, now)
+    insert_entries(tx, feed_id, result, now, cutoff)
 }
 
 /// Insert the fetched entries with deduplication; returns how many were new.
+///
+/// Entries whose effective date (`published`, else `now`) is outside the
+/// window ending at `cutoff` are skipped before reaching the database.
 fn insert_entries(
     tx: &Transaction<'_>,
     feed_id: FeedId,
     result: &FetchResult,
     now: i64,
+    cutoff: i64,
 ) -> Result<usize, MetroError> {
     let mut statement = tx.prepare_cached(INSERT_ENTRY_SQL)?;
     let mut inserted = 0;
 
     for entry in &result.entries {
-        let key = dedup_key(entry);
         // Timestamps beyond i64 cannot be stored; treat them as unknown so
         // pruning falls back to `first_seen`.
         let published = entry
             .published
             .and_then(|seconds| i64::try_from(seconds).ok());
+        // Same rule as pruning: an entry the post-refresh prune would delete
+        // right away is never stored, so it is not counted as new either.
+        if is_outside_window(published.unwrap_or(now), cutoff) {
+            continue;
+        }
 
+        let key = dedup_key(entry);
         inserted += statement.execute(params![
             feed_id.inner(),
             key.as_ref(),
