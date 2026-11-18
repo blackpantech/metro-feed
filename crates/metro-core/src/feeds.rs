@@ -23,14 +23,26 @@
 //!   foreign keys, so the cascade is guaranteed.
 //! - **Provisional metadata**: the v001 schema requires `title`, `site_url`,
 //!   and `kind` to be `NOT NULL`, but [`add_feed`] only receives a URL, an
-//!   optional title, and an optional folder. Until the first refresh parses
-//!   the feed content (which is authoritative for kind, title, and site URL),
-//!   the API stores:
+//!   optional title, and an optional folder, and it never touches the
+//!   network. Until the feed is first fetched (the parsed document is
+//!   authoritative for kind and site URL, design decision D5), it stores:
 //!   - `title`: the supplied title, or the URL's lowercased host,
 //!   - `site_url`: the URL's origin (`scheme://host[:port]`),
-//!   - `kind`: [`FeedKind::Rss`] as a placeholder.
+//!   - `kind`: [`FeedKind::Rss`] as a placeholder,
+//!   - `last_fetch`: `NULL` (never fetched successfully).
 //!
-//!   Callers that need the real metadata refresh the feed after adding it.
+//!   The first successful refresh then replaces the placeholders (design
+//!   decision D10): `kind` and `site_url` are updated on every `200`
+//!   response, and `title` is filled from the feed only while `last_fetch`
+//!   is still `NULL`, so a title supplied here or set later through
+//!   [`rename_feed`] is never overwritten afterwards.
+//!
+//!   [`add_feed`] is the network-free building block for offline and import
+//!   paths. Interactive subscription (`metro feeds add`) goes through
+//!   [`crate::refresh::subscribe_feed`] instead, which fetches the feed first
+//!   and inserts the real metadata and initial entries in one transaction
+//!   (design decision D11), so its rows never carry placeholders except the
+//!   host title when the feed declares none.
 //!
 //! # URL normalization
 //!
@@ -354,7 +366,7 @@ pub fn normalize_url(raw: &str) -> Result<String, MetroError> {
 }
 
 /// Convert a non-negative SQLite row id into a [`FeedId`].
-fn feed_id_from_row_id(row_id: i64) -> Result<FeedId, MetroError> {
+pub(crate) fn feed_id_from_row_id(row_id: i64) -> Result<FeedId, MetroError> {
     u64::try_from(row_id)
         .map(FeedId::new)
         .map_err(|_| MetroError::Generic(format!("feed row id {row_id} is out of range")))
@@ -440,8 +452,10 @@ impl StoredFeed {
 
 /// Verify that a folder exists and is a feed folder.
 ///
-/// Runs inside the caller's transaction so the check cannot race with a
-/// concurrent folder deletion.
+/// Writers call it inside their transaction (a [`Transaction`] dereferences
+/// to a [`Connection`]) so the check cannot race with a concurrent folder
+/// deletion. Read-only callers, such as a subscribe dry run validating its
+/// target folder before any network access, pass a plain connection.
 ///
 /// # Errors
 ///
@@ -449,8 +463,8 @@ impl StoredFeed {
 /// - [`MetroError::Usage`] if the folder belongs to the saved-items
 ///   namespace.
 /// - [`MetroError::Generic`] if the stored folder kind is invalid.
-fn ensure_feed_folder(tx: &Transaction<'_>, folder_id: FolderId) -> Result<(), MetroError> {
-    let kind_text: Option<String> = tx
+pub(crate) fn ensure_feed_folder(conn: &Connection, folder_id: FolderId) -> Result<(), MetroError> {
+    let kind_text: Option<String> = conn
         .query_row(
             "SELECT kind FROM folders WHERE id = ?1",
             params![folder_id.inner()],
@@ -473,6 +487,116 @@ fn ensure_feed_folder(tx: &Transaction<'_>, folder_id: FolderId) -> Result<(), M
     }
 
     Ok(())
+}
+
+/// Placeholder metadata derived from a feed URL alone.
+///
+/// Used whenever a feed row must be written before (or without) the feed
+/// declaring its own title and site URL. See the module documentation on
+/// provisional metadata.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct UrlPlaceholders {
+    /// The URL's lowercased host, used as a fallback title.
+    pub(crate) title: String,
+    /// The URL's origin (`scheme://host[:port]`), used as a fallback site URL.
+    pub(crate) site_url: String,
+}
+
+/// Derive placeholder title and site URL from a normalized feed URL.
+///
+/// # Errors
+///
+/// Returns [`MetroError::Usage`] if `normalized_url` is not an absolute
+/// `http(s)` URL (it always is when produced by [`normalize_url`]).
+pub(crate) fn url_placeholders(normalized_url: &str) -> Result<UrlPlaceholders, MetroError> {
+    let parsed = ParsedUrl::parse(normalized_url)?;
+    Ok(UrlPlaceholders {
+        title: parsed.host_lowercase(),
+        site_url: parsed.origin(),
+    })
+}
+
+/// Trim and validate an explicitly supplied feed title.
+///
+/// `None` stays `None` (the caller picks a fallback); a blank explicit title
+/// is rejected so no blank display name is ever stored silently.
+///
+/// # Errors
+///
+/// Returns [`MetroError::Usage`] if `title` is `Some` but blank.
+pub(crate) fn validate_explicit_title(title: Option<&str>) -> Result<Option<&str>, MetroError> {
+    match title.map(str::trim) {
+        Some("") => Err(MetroError::Usage(
+            "feed title must not be empty".to_string(),
+        )),
+        other => Ok(other),
+    }
+}
+
+/// Look up a subscription by its already-normalized URL.
+///
+/// # Errors
+///
+/// Returns [`MetroError::Generic`] if the query fails or the stored row id
+/// is out of range.
+pub(crate) fn find_feed_by_url(
+    conn: &Connection,
+    normalized_url: &str,
+) -> Result<Option<FeedId>, MetroError> {
+    let row_id: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM feeds WHERE url = ?1",
+            params![normalized_url],
+            |row| row.get(0),
+        )
+        .optional()?;
+    row_id.map(feed_id_from_row_id).transpose()
+}
+
+/// Column values for a new feed row, see [`insert_feed`].
+#[derive(Debug)]
+pub(crate) struct NewFeed<'a> {
+    /// URL already normalized with [`normalize_url`].
+    pub(crate) url: &'a str,
+    /// Final display title.
+    pub(crate) title: &'a str,
+    /// Site URL (declared by the feed, or the URL placeholder).
+    pub(crate) site_url: &'a str,
+    /// Feed format.
+    pub(crate) kind: FeedKind,
+    /// Target folder; validated to be an existing feed folder.
+    pub(crate) folder_id: FolderId,
+}
+
+/// Insert a new feed row inside the caller's write transaction.
+///
+/// Validates the target folder with [`ensure_feed_folder`] first. The caller
+/// is responsible for the duplicate check (in the same transaction) and for
+/// committing. Fetch state (`etag`, `last_modified`, `last_fetch`,
+/// `error_state`, backoff columns) starts out empty.
+///
+/// # Errors
+///
+/// - [`MetroError::NotFound`] / [`MetroError::Usage`] from
+///   [`ensure_feed_folder`].
+/// - [`MetroError::Generic`] if the insert fails (including a `UNIQUE`
+///   violation when the caller skipped the duplicate check).
+pub(crate) fn insert_feed(tx: &Transaction<'_>, feed: &NewFeed<'_>) -> Result<FeedId, MetroError> {
+    ensure_feed_folder(tx, feed.folder_id)?;
+
+    tx.execute(
+        "INSERT INTO feeds (url, title, site_url, kind, folder_id) \
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            feed.url,
+            feed.title,
+            feed.site_url,
+            feed.kind.as_str(),
+            feed.folder_id.inner()
+        ],
+    )?;
+
+    feed_id_from_row_id(tx.last_insert_rowid())
 }
 
 /// Add a feed subscription, or report the existing one when the URL is a
@@ -504,18 +628,9 @@ pub fn add_feed(
     folder_id: Option<FolderId>,
 ) -> Result<AddFeedOutcome, MetroError> {
     let normalized = normalize_url(url)?;
-    let parsed = ParsedUrl::parse(&normalized)?;
-
-    let title = match title.map(str::trim) {
-        Some("") => {
-            return Err(MetroError::Usage(
-                "feed title must not be empty".to_string(),
-            ));
-        }
-        Some(title) => title.to_string(),
-        None => parsed.host_lowercase(),
-    };
-    let site_url = parsed.origin();
+    let placeholders = url_placeholders(&normalized)?;
+    let explicit_title = validate_explicit_title(title)?;
+    let title = explicit_title.unwrap_or(placeholders.title.as_str());
 
     // Creating the default folder runs in its own transaction (folder
     // creation is idempotent), so resolve it before taking the write lock for
@@ -527,36 +642,22 @@ pub fn add_feed(
 
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
-    let existing_id: Option<i64> = tx
-        .query_row(
-            "SELECT id FROM feeds WHERE url = ?1",
-            params![normalized.as_str()],
-            |row| row.get(0),
-        )
-        .optional()?;
-
-    if let Some(row_id) = existing_id {
-        let id = feed_id_from_row_id(row_id)?;
+    if let Some(id) = find_feed_by_url(&tx, &normalized)? {
         // No rows were written; release the write lock explicitly.
         tx.rollback()?;
         return Ok(AddFeedOutcome { id, created: false });
     }
 
-    ensure_feed_folder(&tx, target_folder)?;
-
-    tx.execute(
-        "INSERT INTO feeds (url, title, site_url, kind, folder_id) \
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![
-            normalized.as_str(),
-            title.as_str(),
-            site_url.as_str(),
-            FeedKind::Rss.as_str(),
-            target_folder.inner()
-        ],
+    let id = insert_feed(
+        &tx,
+        &NewFeed {
+            url: &normalized,
+            title,
+            site_url: &placeholders.site_url,
+            kind: FeedKind::Rss,
+            folder_id: target_folder,
+        },
     )?;
-
-    let id = feed_id_from_row_id(tx.last_insert_rowid())?;
     tx.commit()?;
 
     Ok(AddFeedOutcome { id, created: true })
