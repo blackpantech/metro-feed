@@ -8,10 +8,11 @@ use std::time::Duration;
 use rusqlite::params;
 
 use crate::feeds::{add_feed, move_feed, rename_feed};
+use crate::fetch::FetchedEntry;
 use crate::folders::create_folder;
 use crate::models::{FeedKind, FolderKind};
 use crate::refresh::test_support::{
-    MockFetcher, entry, entry_count, modified, not_modified, row_count, test_conn,
+    MockFetcher, entry, entry_count, modified, not_modified, recent_published, row_count, test_conn,
 };
 
 /// Subscribe `count` feeds with provisional metadata; returns their IDs.
@@ -137,6 +138,7 @@ fn test_custom_concurrency_bounds_parallel_fetches() {
         &RefreshOptions {
             concurrency: Some(4),
             progress: None,
+            ..RefreshOptions::default()
         },
     )
     .unwrap();
@@ -171,6 +173,7 @@ fn test_zero_concurrency_is_usage_error() {
         &RefreshOptions {
             concurrency: Some(0),
             progress: None,
+            ..RefreshOptions::default()
         },
     )
     .unwrap_err();
@@ -351,7 +354,7 @@ fn test_new_entries_are_unread_with_first_seen() {
         .unwrap();
     assert_eq!(is_read, 0);
     assert!(first_seen >= before);
-    assert_eq!(published, Some(1_767_225_600));
+    assert_eq!(published, Some(i64::try_from(recent_published()).unwrap()));
 }
 
 #[test]
@@ -391,6 +394,7 @@ fn test_progress_events_are_sent() {
         &RefreshOptions {
             concurrency: Some(2),
             progress: Some(&sender),
+            ..RefreshOptions::default()
         },
     )
     .unwrap();
@@ -437,6 +441,7 @@ fn test_dropped_progress_receiver_does_not_fail_refresh() {
         &RefreshOptions {
             concurrency: None,
             progress: Some(&sender),
+            ..RefreshOptions::default()
         },
     )
     .unwrap();
@@ -782,6 +787,7 @@ fn test_feed_in_backoff_is_skipped() {
         &RefreshOptions {
             concurrency: None,
             progress: Some(&sender),
+            ..RefreshOptions::default()
         },
     )
     .unwrap();
@@ -921,4 +927,201 @@ fn test_failing_feed_is_never_deleted() {
 
     assert_eq!(row_count(&conn, "feeds"), 1);
     assert_eq!(feed_state(&conn, id).consecutive_failures, Some(10));
+}
+
+// ---------------------------------------------------------------------------
+// 10.2 Post-refresh pruning (pruning spec)
+// ---------------------------------------------------------------------------
+
+/// Unix seconds `days` days before now.
+fn days_ago(days: i64) -> i64 {
+    now_unix() - days * 86_400
+}
+
+/// Insert a stored entry with an explicit publication date.
+fn insert_dated_entry(conn: &Connection, feed_id: FeedId, guid: &str, published: Option<i64>) {
+    conn.execute(
+        "INSERT INTO entries (feed_id, guid, url, title, published, first_seen) \
+         VALUES (?1, ?2, '', ?2, ?3, ?4)",
+        params![feed_id.inner(), guid, published, now_unix()],
+    )
+    .unwrap();
+}
+
+/// Stored entry guids, sorted.
+fn entry_guids(conn: &Connection) -> Vec<String> {
+    let mut statement = conn
+        .prepare("SELECT guid FROM entries ORDER BY guid")
+        .unwrap();
+    statement
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+/// A fetched entry with an explicit publication date (`None` = omitted).
+fn dated_entry(guid: &str, published: Option<i64>) -> FetchedEntry {
+    let mut fetched = entry(guid, None);
+    fetched.published = published.map(|seconds| u64::try_from(seconds).unwrap());
+    fetched
+}
+
+#[test]
+fn test_refresh_prunes_entries_older_than_default_window() {
+    let mut conn = test_conn();
+    add_feeds(&mut conn, 1);
+    let fetcher = MockFetcher::new(|_, _, _| {
+        Ok(modified(
+            FeedKind::Rss,
+            None,
+            None,
+            vec![
+                dated_entry("old", Some(days_ago(DEFAULT_WINDOW_DAYS.into()) - 60)),
+                dated_entry("recent", Some(days_ago(2))),
+                // No published date: first_seen (now) decides, so it is kept.
+                dated_entry("undated", None),
+            ],
+        ))
+    });
+
+    let report = refresh_all(&mut conn, &fetcher);
+
+    // The old entry is inserted, then pruned before refresh_feeds returns.
+    assert_eq!(report.new_entries(), 3);
+    assert_eq!(report.pruned, 1);
+    assert_eq!(entry_guids(&conn), vec!["recent", "undated"]);
+}
+
+#[test]
+fn test_refresh_prunes_all_feeds_even_when_not_refreshed() {
+    let mut conn = test_conn();
+    let ids = add_feeds(&mut conn, 2);
+    insert_dated_entry(&conn, ids[0], "old-0", Some(days_ago(40)));
+    insert_dated_entry(&conn, ids[1], "old-1", Some(days_ago(40)));
+    insert_dated_entry(&conn, ids[1], "new-1", Some(days_ago(1)));
+    let fetcher = MockFetcher::new(|_, _, _| Ok(not_modified()));
+
+    let targets = [ids[0]];
+    let report = refresh_feeds(
+        &mut conn,
+        &fetcher,
+        RefreshTarget::Feeds(&targets),
+        &RefreshOptions::default(),
+    )
+    .unwrap();
+
+    assert_eq!(report.pruned, 2);
+    assert_eq!(entry_guids(&conn), vec!["new-1"]);
+}
+
+#[test]
+fn test_refresh_prunes_after_partial_failure() {
+    let mut conn = test_conn();
+    let ids = add_feeds(&mut conn, 2);
+    insert_dated_entry(&conn, ids[1], "old", Some(days_ago(90)));
+    let fetcher = MockFetcher::new(|url, _, _| {
+        if url.contains("feed1.") {
+            Err(MetroError::Network(format!("{url} is down")))
+        } else {
+            Ok(not_modified())
+        }
+    });
+
+    let report = refresh_all(&mut conn, &fetcher);
+
+    assert!(matches!(
+        report.exit_status(),
+        Err(MetroError::PartialSuccess(_))
+    ));
+    assert_eq!(report.pruned, 1);
+    assert_eq!(row_count(&conn, "entries"), 0);
+}
+
+#[test]
+fn test_refresh_prunes_when_every_feed_fails_or_is_skipped() {
+    let mut conn = test_conn();
+    let id = add_feeds(&mut conn, 1)[0];
+    insert_dated_entry(&conn, id, "old-a", Some(days_ago(31)));
+    let failing = MockFetcher::new(|_, _, _| Err(MetroError::Network("down".to_string())));
+
+    let failed = refresh_all(&mut conn, &failing);
+    assert_eq!(failed.pruned, 1);
+
+    // The feed is now in backoff: nothing is fetched, pruning still runs.
+    insert_dated_entry(&conn, id, "old-b", Some(days_ago(31)));
+    let skipped = refresh_all(&mut conn, &failing);
+    assert!(skipped.results.is_empty());
+    assert_eq!(skipped.pruned, 1);
+    assert_eq!(row_count(&conn, "entries"), 0);
+}
+
+#[test]
+fn test_refresh_prunes_unread_entries() {
+    let mut conn = test_conn();
+    let id = add_feeds(&mut conn, 1)[0];
+    insert_dated_entry(&conn, id, "unread-old", Some(days_ago(45)));
+    let fetcher = MockFetcher::new(|_, _, _| Ok(not_modified()));
+
+    let report = refresh_all(&mut conn, &fetcher);
+
+    assert_eq!(report.pruned, 1);
+    assert_eq!(row_count(&conn, "entries"), 0);
+}
+
+#[test]
+fn test_refresh_respects_custom_prune_window() {
+    let mut conn = test_conn();
+    let id = add_feeds(&mut conn, 1)[0];
+    insert_dated_entry(&conn, id, "ten-days", Some(days_ago(10)));
+    insert_dated_entry(&conn, id, "two-days", Some(days_ago(2)));
+    let fetcher = MockFetcher::new(|_, _, _| Ok(not_modified()));
+
+    let report = refresh_feeds(
+        &mut conn,
+        &fetcher,
+        RefreshTarget::All,
+        &RefreshOptions {
+            prune_window_days: Some(7),
+            ..RefreshOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(report.pruned, 1);
+    assert_eq!(entry_guids(&conn), vec!["two-days"]);
+}
+
+#[test]
+fn test_zero_prune_window_is_usage_error_before_fetching() {
+    let mut conn = test_conn();
+    let id = add_feeds(&mut conn, 1)[0];
+    insert_dated_entry(&conn, id, "old", Some(days_ago(90)));
+    let fetcher = MockFetcher::new(|_, _, _| Ok(not_modified()));
+
+    let error = refresh_feeds(
+        &mut conn,
+        &fetcher,
+        RefreshTarget::All,
+        &RefreshOptions {
+            prune_window_days: Some(0),
+            ..RefreshOptions::default()
+        },
+    )
+    .unwrap_err();
+
+    assert!(matches!(error, MetroError::Usage(_)));
+    assert!(fetcher.calls().is_empty());
+    assert_eq!(row_count(&conn, "entries"), 1);
+}
+
+#[test]
+fn test_nothing_to_prune_reports_zero() {
+    let mut conn = test_conn();
+    add_feeds(&mut conn, 1);
+
+    let report = refresh_all(&mut conn, &per_feed_entry_fetcher());
+
+    assert_eq!(report.pruned, 0);
+    assert_eq!(row_count(&conn, "entries"), 1);
 }

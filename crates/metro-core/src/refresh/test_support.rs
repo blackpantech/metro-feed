@@ -4,8 +4,8 @@
 //! the network), builders for canned [`FetchResult`]s, and small database
 //! helpers.
 
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
@@ -118,14 +118,27 @@ pub(crate) fn entry_count(conn: &Connection, feed_id: FeedId) -> i64 {
     .unwrap()
 }
 
-/// A fetched entry with a guid and optional URL.
+/// A publication date (Unix seconds) one day before the first call, stable
+/// for the whole test process.
+///
+/// Fixture entries must stay inside the pruning window, otherwise the
+/// post-refresh prune would delete them; a fixed calendar date would expire
+/// as the real clock advances. Being computed once keeps content hashes of
+/// guidless fixture entries identical across calls.
+pub(crate) fn recent_published() -> u64 {
+    static PUBLISHED: OnceLock<u64> = OnceLock::new();
+    *PUBLISHED.get_or_init(|| u64::try_from(jiff::Timestamp::now().as_second() - 86_400).unwrap())
+}
+
+/// A fetched entry with a guid and optional URL, published recently (see
+/// [`recent_published`]).
 pub(crate) fn entry(guid: &str, url: Option<&str>) -> FetchedEntry {
     FetchedEntry {
         guid: guid.to_string(),
         url: url.map(str::to_string),
         title: Some(format!("Entry {guid}")),
         author: None,
-        published: Some(1_767_225_600),
+        published: Some(recent_published()),
         summary: None,
         content: None,
     }
