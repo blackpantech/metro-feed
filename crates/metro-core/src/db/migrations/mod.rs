@@ -252,4 +252,71 @@ mod tests {
         assert!(indexes.contains(&"idx_entries_is_read".to_string()));
         assert!(indexes.contains(&"idx_feeds_next_retry".to_string()));
     }
+
+    /// `feeds` carries the backoff state of the `backoff` spec (design D6):
+    /// `consecutive_failures INTEGER DEFAULT 0` and a nullable
+    /// `next_retry INTEGER` (Unix seconds).
+    #[test]
+    fn test_migration_feeds_backoff_columns() {
+        let mut conn = open_in_memory().unwrap();
+
+        run_migrations(&mut conn).unwrap();
+
+        // (name, declared type, NOT NULL flag, default expression)
+        let columns: Vec<(String, String, bool, Option<String>)> = conn
+            .prepare("SELECT name, type, \"notnull\", dflt_value FROM pragma_table_info('feeds')")
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let column = |name: &str| {
+            columns
+                .iter()
+                .find(|column| column.0 == name)
+                .unwrap_or_else(|| panic!("feeds.{name} is missing"))
+        };
+
+        let failures = column("consecutive_failures");
+        assert_eq!(failures.1, "INTEGER");
+        assert!(!failures.2);
+        assert_eq!(failures.3.as_deref(), Some("0"));
+
+        let next_retry = column("next_retry");
+        assert_eq!(next_retry.1, "INTEGER");
+        assert!(!next_retry.2);
+        assert_eq!(next_retry.3, None);
+    }
+
+    /// A feed inserted without backoff state starts healthy: zero failures
+    /// and no retry deadline.
+    #[test]
+    fn test_migration_feeds_backoff_defaults() {
+        let mut conn = open_in_memory().unwrap();
+
+        run_migrations(&mut conn).unwrap();
+
+        conn.execute(
+            "INSERT INTO folders (id, name, kind) VALUES (1, 'Test', 'feeds')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO feeds (id, url, title, site_url, kind, folder_id) VALUES (1, 'https://example.com/feed', 'Test', 'https://example.com', 'rss', 1)",
+            [],
+        )
+        .unwrap();
+
+        let (failures, next_retry): (Option<i64>, Option<i64>) = conn
+            .query_row(
+                "SELECT consecutive_failures, next_retry FROM feeds WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(failures, Some(0));
+        assert_eq!(next_retry, None);
+    }
 }
