@@ -28,10 +28,10 @@
 //! # Output
 //!
 //! - `list`: one folder name per line (human/tabular), or one
-//!   [`Folder`] JSON object per line with `--json` (`{"id":3,"name":"Tech",
-//!   "kind":"feeds"}`). Folder IDs are omitted from text output on purpose:
-//!   folders are addressed by name, and their `f<N>` display form would be
-//!   indistinguishable from feed IDs.
+//!   [`Folder`] JSON object per line with `--json` (`{"id":"fo3",
+//!   "name":"Tech","kind":"feeds"}`; IDs are prefixed strings, see
+//!   `metro_core::models::id`). Folder IDs are omitted from text output on
+//!   purpose: folders are addressed by name.
 //! - `add` / `rename` / `remove`: a status line, or with `--json` the
 //!   created / renamed / removed folder as one JSON object.
 
@@ -356,6 +356,10 @@ mod command_tests {
         let names: Vec<&str> = folders.iter().map(Folder::name).collect();
         assert_eq!(names, ["News", "Tech"]);
         assert!(folders.iter().all(|f| f.kind() == FolderKind::Feeds));
+        // IDs are `fo`-prefixed strings, distinct from feed IDs.
+        let first: serde_json::Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+        assert_eq!(first["id"], folders[0].id().to_string());
+        assert!(first["id"].as_str().unwrap().starts_with("fo"), "{first}");
     }
 
     #[test]

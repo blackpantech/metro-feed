@@ -65,7 +65,8 @@
 //!
 //! Output: one entry per line, `id  published  read-state  title  url`
 //! (published as RFC 3339 UTC, `-` when the feed gave no date). With
-//! `--json`: NDJSON, one `Entry` object per line. Listing never marks
+//! `--json`: NDJSON, one `Entry` object per line (`"id":"e4031"`,
+//! `"feed_id":"f12"`: prefixed strings, as in text). Listing never marks
 //! entries read. Titles and URLs come from remote feeds and are sanitized by
 //! the shared [`Output`].
 
@@ -780,7 +781,7 @@ mod command_tests {
         assert!(result.is_ok(), "{result:?}");
         let value: serde_json::Value = serde_json::from_str(out.trim_end()).unwrap();
         assert_eq!(value["fetched"], 1);
-        assert_eq!(value["feeds"][0]["id"], one.inner());
+        assert_eq!(value["feeds"][0]["id"], one.to_string());
 
         let (out, result) = exec_refresh(
             &mut conn,
@@ -791,7 +792,7 @@ mod command_tests {
         assert!(result.is_ok(), "{result:?}");
         let value: serde_json::Value = serde_json::from_str(out.trim_end()).unwrap();
         assert_eq!(value["fetched"], 1);
-        assert_eq!(value["feeds"][0]["id"], two.inner());
+        assert_eq!(value["feeds"][0]["id"], two.to_string());
     }
 
     #[test]
@@ -839,13 +840,13 @@ mod command_tests {
         assert_eq!(value["new_entries"], 2);
         assert_eq!(value["pruned"], 0);
         let feeds = value["feeds"].as_array().unwrap();
-        assert_eq!(feeds[0]["id"], ok.inner());
+        assert_eq!(feeds[0]["id"], ok.to_string());
         assert_eq!(feeds[0]["status"], "updated");
         assert_eq!(feeds[0]["new_entries"], 2);
         assert_eq!(feeds[0]["title"], "Blog");
-        assert_eq!(feeds[1]["id"], same.inner());
+        assert_eq!(feeds[1]["id"], same.to_string());
         assert_eq!(feeds[1]["status"], "not_modified");
-        assert_eq!(feeds[2]["id"], failing.inner());
+        assert_eq!(feeds[2]["id"], failing.to_string());
         assert_eq!(feeds[2]["status"], "failed");
         assert_eq!(feeds[2]["exit_code"], 4);
         assert!(
@@ -946,8 +947,8 @@ mod command_tests {
             .map(|line| serde_json::from_str(line).unwrap())
             .collect();
         assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0]["id"], 1);
-        assert_eq!(lines[0]["feed_id"], id.inner());
+        assert_eq!(lines[0]["id"], "e1");
+        assert_eq!(lines[0]["feed_id"], id.to_string());
         assert_eq!(lines[0]["is_read"], false);
         assert_eq!(lines[1]["is_read"], true);
     }

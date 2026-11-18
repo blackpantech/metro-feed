@@ -440,6 +440,15 @@ mod end_to_end_tests {
         assert_eq!(value["url"], format!("{base}/feed.xml"));
         assert_eq!(value["kind"], "rss");
         assert_eq!(value["folder_name"], "Unsorted");
+        assert_eq!(value["folder_id"], "fo1");
+
+        // An `id` copied from `--json` output is a valid argument verbatim.
+        let id = value["id"].as_str().unwrap();
+        assert_eq!(id, "f1");
+        let run = metro(&db, &["--json", "feeds", "info", id]);
+        assert_eq!(run.code, 0, "{}", run.err);
+        let info: serde_json::Value = serde_json::from_str(run.out.trim_end()).unwrap();
+        assert_eq!(info["id"], id);
 
         // Already subscribed: reported without any network access (the
         // server has stopped accepting connections by now).
@@ -648,6 +657,11 @@ mod end_to_end_tests {
         let run = metro(&db, &["--json", "view", "f1", "--unread"]);
         let value: serde_json::Value = serde_json::from_str(run.out.trim_end()).unwrap();
         assert_eq!(value["guid"], "g1");
+        assert_eq!(value["id"], "e1");
+        // The entry's `feed_id`, copied verbatim, addresses its feed again.
+        let feed_id = value["feed_id"].as_str().unwrap();
+        assert_eq!(feed_id, "f1");
+        assert_eq!(metro(&db, &["view", feed_id]).code, 0);
         assert_eq!(metro(&db, &["view", "f2"]).out, "");
 
         // Failed feeds are now in backoff: skipped, not failures, exit 0.
@@ -656,6 +670,7 @@ mod end_to_end_tests {
         let value: serde_json::Value = serde_json::from_str(run.out.trim_end()).unwrap();
         assert_eq!(value["fetched"], 1);
         assert_eq!(value["skipped"], 2);
+        assert_eq!(value["feeds"][0]["id"], "f1");
         assert!(run.err.is_empty(), "{}", run.err);
 
         // Usage and not-found errors.
