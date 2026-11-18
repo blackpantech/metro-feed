@@ -447,11 +447,11 @@ mod tests {
         });
         assert_eq!(tabular, "f1\tfailed\nf10\ta b\ndone\n");
         let json = render(OutputFormat::Json, |o| {
-            o.report(&row, &rows, "done").unwrap()
+            o.report(&row, &rows, "done").unwrap();
         });
         assert_eq!(json, "{\"id\":7,\"name\":\"x\"}\n");
         let empty = render(OutputFormat::Human, |o| {
-            o.report(&row, &[], "done").unwrap()
+            o.report(&row, &[], "done").unwrap();
         });
         assert_eq!(empty, "done\n");
     }

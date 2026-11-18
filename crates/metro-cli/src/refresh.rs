@@ -444,8 +444,8 @@ mod tests {
     use crate::{Cli, Commands};
 
     fn parse(args: &[&str]) -> Commands {
-        let argv = std::iter::once("metro").chain(args.iter().copied());
-        Cli::try_parse_from(argv).unwrap().command.unwrap()
+        let command_line = std::iter::once("metro").chain(args.iter().copied());
+        Cli::try_parse_from(command_line).unwrap().command.unwrap()
     }
 
     fn parse_refresh(args: &[&str]) -> RefreshArgs {
@@ -463,14 +463,14 @@ mod tests {
     }
 
     fn parse_error_code(args: &[&str]) -> i32 {
-        let argv = std::iter::once("metro").chain(args.iter().copied());
-        Cli::try_parse_from(argv).unwrap_err().exit_code()
+        let command_line = std::iter::once("metro").chain(args.iter().copied());
+        Cli::try_parse_from(command_line).unwrap_err().exit_code()
     }
 
     #[test]
     fn test_parse_refresh_defaults() {
         let args = parse_refresh(&[]);
-        assert!(args.ids.is_empty());
+        assert_eq!(args.ids, []);
         assert_eq!(args.folder, None);
         assert_eq!(args.jobs, None);
     }
@@ -586,7 +586,7 @@ mod tests {
         drop(sender);
         let mut sink = Vec::new();
         render_progress(&receiver, &mut sink);
-        assert!(sink.is_empty());
+        assert_eq!(sink, b"");
     }
 }
 
@@ -805,7 +805,7 @@ mod command_tests {
             None,
         );
         assert_eq!(result.unwrap_err().exit_code(), 3);
-        assert!(out.is_empty());
+        assert_eq!(out, "");
 
         let (out, result) = exec_refresh(
             &mut conn,
@@ -814,7 +814,7 @@ mod command_tests {
             None,
         );
         assert_eq!(result.unwrap_err().exit_code(), 3);
-        assert!(out.is_empty());
+        assert_eq!(out, "");
 
         let mut zero_jobs = args(&[], None);
         zero_jobs.jobs = Some(0);
@@ -980,6 +980,6 @@ mod command_tests {
         assert_eq!(err.exit_code(), 3);
         let err = run_view(&view_args(id, false, false, Some(0)), &conn, &mut output).unwrap_err();
         assert_eq!(err.exit_code(), 2);
-        assert!(buf.is_empty());
+        assert_eq!(buf, b"");
     }
 }

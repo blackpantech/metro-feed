@@ -211,16 +211,16 @@ mod tests {
             folder_id: FolderId(1),
             etag: Some("\"abc123\"".to_string()),
             last_modified: Some("Wed, 21 Oct 2015 07:28:00 GMT".to_string()),
-            last_fetch: Some(1445414880),
+            last_fetch: Some(1_445_414_880),
             error_state: None,
             last_error_at: None,
         };
 
         // Verify all required fields are present
         assert_eq!(feed.id.0, 1);
-        assert!(!feed.url.is_empty());
-        assert!(!feed.title.is_empty());
-        assert!(!feed.site_url.is_empty());
+        assert_ne!(feed.url, "");
+        assert_ne!(feed.title, "");
+        assert_ne!(feed.site_url, "");
         assert!(matches!(
             feed.kind,
             FeedKind::Rss | FeedKind::Atom | FeedKind::Json | FeedKind::Youtube
@@ -286,7 +286,7 @@ mod tests {
         );
         assert!(feed.is_unfetched());
 
-        feed.set_last_fetch(1234567890);
+        feed.set_last_fetch(1_234_567_890);
         assert!(!feed.is_unfetched());
     }
 
@@ -301,9 +301,9 @@ mod tests {
             folder_id: FolderId(2),
             etag: Some("\"xyz789\"".to_string()),
             last_modified: Some("Thu, 01 Jan 2026 00:00:00 GMT".to_string()),
-            last_fetch: Some(1767225600),
+            last_fetch: Some(1_767_225_600),
             error_state: Some("HTTP 500".to_string()),
-            last_error_at: Some(1767229200),
+            last_error_at: Some(1_767_229_200),
         };
 
         let json = serde_json::to_string_pretty(&feed).unwrap();

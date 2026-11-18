@@ -453,8 +453,8 @@ mod tests {
 
     /// Parse `metro feeds …` and return the feeds subcommand.
     fn parse(args: &[&str]) -> FeedsCommand {
-        let argv = ["metro", "feeds"].iter().chain(args).copied();
-        match Cli::try_parse_from(argv).unwrap().command {
+        let command_line = ["metro", "feeds"].iter().chain(args).copied();
+        match Cli::try_parse_from(command_line).unwrap().command {
             Some(Commands::Feeds(feeds)) => feeds.command,
             other => panic!("expected feeds command, got {other:?}"),
         }
@@ -462,8 +462,8 @@ mod tests {
 
     /// Parse `metro <args>` and return the usage error's exit code.
     fn parse_error_code(args: &[&str]) -> i32 {
-        let argv = std::iter::once("metro").chain(args.iter().copied());
-        Cli::try_parse_from(argv).unwrap_err().exit_code()
+        let command_line = std::iter::once("metro").chain(args.iter().copied());
+        Cli::try_parse_from(command_line).unwrap_err().exit_code()
     }
 
     #[test]
@@ -648,6 +648,10 @@ mod command_tests {
 
     /// An Atom `200` result titled "Atom Blog" with two entries whose guids
     /// derive from the feed URL (entry guids are unique database-wide).
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "mock responder: must match the fallible `Fn(&str) -> Result<_, MetroError>` signature the mock takes"
+    )]
     fn atom_result(url: &str) -> Result<FetchResult, MetroError> {
         let entry = |n: &str| FetchedEntry {
             guid: format!("{url}#{n}"),
@@ -841,8 +845,8 @@ mod command_tests {
         assert_eq!(value["entry_count"], 2);
         assert_eq!(value["folder_name"], "Unsorted");
 
-        assert!(list_feeds(&conn, None).unwrap().is_empty());
-        assert!(list_folders(&conn, FolderKind::Feeds).unwrap().is_empty());
+        assert_eq!(list_feeds(&conn, None).unwrap(), []);
+        assert_eq!(list_folders(&conn, FolderKind::Feeds).unwrap(), []);
     }
 
     #[test]
@@ -863,7 +867,7 @@ mod command_tests {
             exec_add(&mut conn, OutputFormat::Human, &add_args(FEED_URL), &parse).unwrap_err();
         assert_eq!(err.exit_code(), 1, "{err}");
 
-        assert!(list_feeds(&conn, None).unwrap().is_empty());
+        assert_eq!(list_feeds(&conn, None).unwrap(), []);
     }
 
     #[test]
@@ -999,7 +1003,7 @@ mod command_tests {
                  Removed feed {two} \"Atom Blog\" and its 2 entries\n"
             )
         );
-        assert!(list_feeds(&conn, None).unwrap().is_empty());
+        assert_eq!(list_feeds(&conn, None).unwrap(), []);
     }
 
     #[test]

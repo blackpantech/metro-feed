@@ -283,7 +283,7 @@ mod tests {
         assert!(out.contains("feeds"), "{out}");
         assert!(out.contains("refresh"), "{out}");
         assert!(out.contains("view"), "{out}");
-        assert!(err.is_empty());
+        assert_eq!(err, b"");
     }
 
     #[test]
@@ -322,10 +322,10 @@ mod end_to_end_tests {
 
     fn metro(db: &TempDb, args: &[&str]) -> Run {
         let db_arg = db.0.to_string_lossy();
-        let argv = ["metro", "--db", db_arg.as_ref()]
+        let command_line = ["metro", "--db", db_arg.as_ref()]
             .into_iter()
             .chain(args.iter().copied());
-        let cli = Cli::try_parse_from(argv).unwrap();
+        let cli = Cli::try_parse_from(command_line).unwrap();
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let code = execute(&cli, &mut out, &mut err, false, None);
         Run {
@@ -653,7 +653,7 @@ mod end_to_end_tests {
         // The healthy feed's entry is listed.
         let run = metro(&db, &["view", "f1"]);
         assert_eq!(run.code, 0, "{}", run.err);
-        assert_eq!(run.out, format!("e1\t-\tunread\tOne\t{base}/1\n"),);
+        assert_eq!(run.out, format!("e1\t-\tunread\tOne\t{base}/1\n"));
         let run = metro(&db, &["--json", "view", "f1", "--unread"]);
         let value: serde_json::Value = serde_json::from_str(run.out.trim_end()).unwrap();
         assert_eq!(value["guid"], "g1");
@@ -728,7 +728,7 @@ mod end_to_end_tests {
 
         let duplicate = metro(&db, &["folders", "add", "tech"]);
         assert_eq!(duplicate.code, 1);
-        assert!(duplicate.out.is_empty());
+        assert_eq!(duplicate.out, "");
         assert!(duplicate.err.starts_with("metro: "), "{}", duplicate.err);
 
         let missing = metro(&db, &["folders", "remove", "Ghost"]);

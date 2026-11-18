@@ -176,8 +176,8 @@ mod tests {
 
     /// Parse `metro folders …` and return the folders subcommand.
     fn parse(args: &[&str]) -> FoldersCommand {
-        let argv = ["metro", "folders"].iter().chain(args).copied();
-        match Cli::try_parse_from(argv).unwrap().command {
+        let command_line = ["metro", "folders"].iter().chain(args).copied();
+        match Cli::try_parse_from(command_line).unwrap().command {
             Some(Commands::Folders(folders)) => folders.command,
             other => panic!("expected folders command, got {other:?}"),
         }
@@ -253,8 +253,8 @@ mod tests {
             &["folders", "rename", "OnlyOne"][..],
             &["folders"][..],
         ] {
-            let argv = std::iter::once("metro").chain(args.iter().copied());
-            let err = Cli::try_parse_from(argv).unwrap_err();
+            let command_line = std::iter::once("metro").chain(args.iter().copied());
+            let err = Cli::try_parse_from(command_line).unwrap_err();
             assert_eq!(err.exit_code(), 2, "args {args:?}");
         }
     }
