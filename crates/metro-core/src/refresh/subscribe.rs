@@ -12,6 +12,11 @@
 //!   transaction, through the same writer path as a refresh
 //!   (`writer::apply_fetch_success`). Storing validators without entries
 //!   would make the next refresh receive a `304` and never insert them.
+//!   Like a refresh, entries already outside the **default** pruning window
+//!   ([`DEFAULT_WINDOW_DAYS`]) are not inserted, so a feed with an old
+//!   archive does not start with entries the next prune would delete; an
+//!   undated entry is always inserted. [`FeedPreview::entry_count`] still
+//!   counts every entry of the fetched document.
 //!
 //! # Flow
 //!
@@ -68,6 +73,7 @@ use crate::feeds::{
 use crate::fetch::FetchResult;
 use crate::folders::ensure_default;
 use crate::models::{FeedId, FeedKind, FolderId};
+use crate::prune::{DEFAULT_WINDOW_DAYS, window_cutoff};
 use crate::refresh::FeedFetcher;
 use crate::refresh::writer::{apply_fetch_success, now_unix};
 
@@ -98,7 +104,8 @@ pub enum SubscribeOutcome {
         id: FeedId,
         /// The stored metadata.
         feed: FeedPreview,
-        /// Entries inserted (after deduplication against existing entries).
+        /// Entries inserted (after deduplication against existing entries;
+        /// entries outside the default pruning window are not inserted).
         new_entries: usize,
     },
     /// The normalized URL was already subscribed; nothing was fetched or
@@ -181,7 +188,10 @@ pub fn subscribe_feed<F: FeedFetcher>(
         },
     )?;
     // The final title is already stored, so no title candidate is offered.
-    let new_entries = apply_fetch_success(&tx, id, &result, None, now_unix())?;
+    // Entries outside the default window are skipped, as a refresh would.
+    let now = now_unix();
+    let cutoff = window_cutoff(DEFAULT_WINDOW_DAYS, now)?;
+    let new_entries = apply_fetch_success(&tx, id, &result, None, now, cutoff)?;
     tx.commit()?;
 
     Ok(SubscribeOutcome::Subscribed {
@@ -354,6 +364,47 @@ mod tests {
         assert_eq!(calls[0].url, ATOM_URL);
         assert_eq!(calls[0].etag, None);
         assert_eq!(calls[0].last_modified, None);
+    }
+
+    /// Subscribing applies the default pruning window: an entry already
+    /// outside it is not inserted, recent and undated entries are.
+    #[test]
+    fn test_subscribe_skips_entries_outside_default_window() {
+        let mut conn = test_conn();
+        let now = now_unix();
+        let fetcher = MockFetcher::new(move |_, _, _| {
+            let mut old = entry("old", None);
+            old.published = u64::try_from(now - i64::from(DEFAULT_WINDOW_DAYS + 1) * 86_400).ok();
+            let mut undated = entry("undated", None);
+            undated.published = None;
+            Ok(modified(
+                FeedKind::Rss,
+                None,
+                None,
+                vec![old, entry("recent", None), undated],
+            ))
+        });
+
+        let outcome = subscribe_feed(&mut conn, &fetcher, ATOM_URL, None, None, false).unwrap();
+
+        let SubscribeOutcome::Subscribed {
+            feed, new_entries, ..
+        } = outcome
+        else {
+            panic!("expected Subscribed, got {outcome:?}");
+        };
+        // The preview describes the fetched document, skipped entries included.
+        assert_eq!(feed.entry_count, 3);
+        assert_eq!(new_entries, 2);
+        let mut statement = conn
+            .prepare("SELECT guid FROM entries ORDER BY guid")
+            .unwrap();
+        let guids: Vec<String> = statement
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(guids, vec!["recent", "undated"]);
     }
 
     #[test]

@@ -1045,30 +1045,106 @@ fn dated_entry(guid: &str, published: Option<i64>) -> FetchedEntry {
     fetched
 }
 
-#[test]
-fn test_refresh_prunes_entries_older_than_default_window() {
-    let mut conn = test_conn();
-    add_feeds(&mut conn, 1);
-    let fetcher = MockFetcher::new(|_, _, _| {
+/// A mock fetcher answering every feed with the given dated entries.
+fn dated_fetcher(entries: Vec<(&'static str, Option<i64>)>) -> MockFetcher<impl FetchFn> {
+    MockFetcher::new(move |_, _, _| {
         Ok(modified(
             FeedKind::Rss,
             None,
             None,
-            vec![
-                dated_entry("old", Some(days_ago(DEFAULT_WINDOW_DAYS.into()) - 60)),
-                dated_entry("recent", Some(days_ago(2))),
-                // No published date: first_seen (now) decides, so it is kept.
-                dated_entry("undated", None),
-            ],
+            entries
+                .iter()
+                .map(|(guid, published)| dated_entry(guid, *published))
+                .collect(),
         ))
-    });
+    })
+}
+
+/// Entries already outside the window are never inserted: they are neither
+/// counted as new nor reported as pruned (task 17.2).
+#[test]
+fn test_refresh_skips_entries_older_than_default_window() {
+    let mut conn = test_conn();
+    add_feeds(&mut conn, 1);
+    let fetcher = dated_fetcher(vec![
+        ("old", Some(days_ago(DEFAULT_WINDOW_DAYS.into()) - 60)),
+        ("recent", Some(days_ago(2))),
+        // No published date: counts as "now", so it is inserted.
+        ("undated", None),
+    ]);
 
     let report = refresh_all(&mut conn, &fetcher);
 
-    // The old entry is inserted, then pruned before refresh_feeds returns.
-    assert_eq!(report.new_entries(), 3);
-    assert_eq!(report.pruned, 1);
+    assert_eq!(report.new_entries(), 2);
+    assert_eq!(report.pruned, 0);
     assert_eq!(entry_guids(&conn), vec!["recent", "undated"]);
+
+    // The feed keeps serving the old entry: it never churns.
+    let again = refresh_all(&mut conn, &fetcher);
+    assert_eq!(again.new_entries(), 0);
+    assert_eq!(again.pruned, 0);
+    assert_eq!(entry_guids(&conn), vec!["recent", "undated"]);
+}
+
+#[test]
+fn test_refresh_inserts_recent_and_undated_entries() {
+    let mut conn = test_conn();
+    let id = add_feeds(&mut conn, 1)[0];
+    let fetcher = dated_fetcher(vec![
+        ("recent", Some(days_ago(1))),
+        ("undated", None),
+        ("future", Some(days_ago(-1))),
+    ]);
+
+    let report = refresh_all(&mut conn, &fetcher);
+
+    assert_eq!(report.new_entries(), 3);
+    assert_eq!(report.pruned, 0);
+    assert_eq!(entry_count(&conn, id), 3);
+}
+
+/// The insert-time skip uses the refresh's prune window, not the default.
+#[test]
+fn test_refresh_skip_uses_custom_prune_window() {
+    let mut conn = test_conn();
+    add_feeds(&mut conn, 1);
+    let fetcher = dated_fetcher(vec![
+        ("ten-days", Some(days_ago(10))),
+        ("two-days", Some(days_ago(2))),
+    ]);
+
+    let report = refresh_feeds(
+        &mut conn,
+        &fetcher,
+        RefreshTarget::All,
+        &RefreshOptions {
+            prune_window_days: Some(7),
+            ..RefreshOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(report.new_entries(), 1);
+    assert_eq!(report.pruned, 0);
+    assert_eq!(entry_guids(&conn), vec!["two-days"]);
+}
+
+/// Stored entries that age out are still pruned, and only they are counted.
+#[test]
+fn test_refresh_prunes_only_aged_out_entries() {
+    let mut conn = test_conn();
+    let id = add_feeds(&mut conn, 1)[0];
+    insert_dated_entry(&conn, id, "aged-out", Some(days_ago(40)));
+    let fetcher = dated_fetcher(vec![
+        ("old", Some(days_ago(50))),
+        ("recent", Some(days_ago(1))),
+    ]);
+
+    let report = refresh_all(&mut conn, &fetcher);
+
+    assert_eq!(report.new_entries(), 1);
+    assert_eq!(report.pruned, 1);
+    assert_eq!(entry_guids(&conn), vec!["recent"]);
 }
 
 #[test]
