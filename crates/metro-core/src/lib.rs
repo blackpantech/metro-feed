@@ -5,6 +5,7 @@
 
 pub mod config;
 pub mod db;
+pub mod discovery;
 pub mod error;
 pub mod feeds;
 pub mod folders;

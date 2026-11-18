@@ -23,6 +23,7 @@ ureq = "3.5"
 rustls = "0.24"
 feed-rs = "3.0"
 scraper = "0.29"
+url = "2.5"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
