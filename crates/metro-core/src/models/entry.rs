@@ -301,8 +301,8 @@ mod tests {
 
         let json = serde_json::to_string(&entry).unwrap();
         // Verify snake_case field names
-        assert!(json.contains("\"id\""));
-        assert!(json.contains("\"feed_id\""));
+        assert!(json.contains("\"id\":\"e1\""), "{json}");
+        assert!(json.contains("\"feed_id\":\"f1\""), "{json}");
         assert!(json.contains("\"guid\""));
         assert!(json.contains("\"url\""));
         assert!(json.contains("\"title\""));

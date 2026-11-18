@@ -73,6 +73,9 @@
 //!   `null` when unset), like every timestamp of the `Feed` / `FeedInfo`
 //!   objects.
 //!
+//! In JSON, IDs are prefixed strings (`"id":"f12"`, `"folder_id":"fo3"`), the
+//! same form as in text output, so a copied `id` is a valid `<f-id>` argument.
+//!
 //! Feed titles and URLs come from remote documents; the shared [`Output`]
 //! sanitizes them before printing (terminal control sequences are removed).
 
@@ -543,6 +546,10 @@ mod tests {
         let err = Cli::try_parse_from(["metro", "feeds", "info", "12"]).unwrap_err();
         assert_eq!(err.exit_code(), 2);
         assert!(err.to_string().contains("f<number>"), "{err}");
+        // A folder ID (`fo<N>`) is never misread as a feed ID.
+        let err = Cli::try_parse_from(["metro", "feeds", "info", "fo1"]).unwrap_err();
+        assert_eq!(err.exit_code(), 2);
+        assert!(err.to_string().contains("f<number>"), "{err}");
         for args in [
             &["feeds", "remove", "e12"][..],
             &["feeds", "rename", "fx", "Title"][..],
@@ -718,7 +725,7 @@ mod command_tests {
         )
         .unwrap();
         let value: serde_json::Value = serde_json::from_str(text.trim_end()).unwrap();
-        FeedId(value["id"].as_u64().unwrap())
+        value["id"].as_str().unwrap().parse().unwrap()
     }
 
     #[test]
@@ -796,7 +803,7 @@ mod command_tests {
         let json = exec_add(&mut conn, OutputFormat::Json, &add_args(FEED_URL), &fetcher).unwrap();
         let value: serde_json::Value = serde_json::from_str(json.trim_end()).unwrap();
         assert_eq!(value["status"], "duplicate");
-        assert_eq!(value["id"], id.inner());
+        assert_eq!(value["id"], id.to_string());
     }
 
     #[test]
@@ -931,7 +938,8 @@ mod command_tests {
             .collect();
         assert_eq!(values.len(), 2);
         assert_eq!(values[0]["folder_name"], "Tech");
-        assert_eq!(values[0]["id"], tech.inner());
+        assert_eq!(values[0]["id"], tech.to_string());
+        assert!(values[0]["folder_id"].as_str().unwrap().starts_with("fo"));
         assert_eq!(values[1]["kind"], "atom");
         // Healthy feeds carry an explicit `null` failure timestamp.
         assert!(values[0]["last_error_at"].is_null());

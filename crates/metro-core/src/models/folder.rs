@@ -129,7 +129,7 @@ mod tests {
 
         let json = serde_json::to_string(&folder).unwrap();
         // Verify snake_case field names
-        assert!(json.contains("\"id\""));
+        assert!(json.contains("\"id\":\"fo1\""), "{json}");
         assert!(json.contains("\"name\""));
         assert!(json.contains("\"kind\""));
     }

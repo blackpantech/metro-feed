@@ -6,7 +6,9 @@
 //! - [`Entry`]: A single entry/article from a feed
 //!
 //! It also includes:
-//! - Typed ID wrappers ([`FolderId`], [`FeedId`], [`EntryId`], [`SavedItemId`]) for compile-time safety
+//! - Typed ID wrappers ([`FolderId`] `fo3`, [`FeedId`] `f12`, [`EntryId`] `e4031`,
+//!   [`SavedItemId`] `s3`) for compile-time safety. They display, parse and
+//!   serialize to JSON in that prefixed string form (see [`id`])
 //! - Enumerations ([`FolderKind`], [`FeedKind`]) for type-safe categorization
 
 pub mod entry;
