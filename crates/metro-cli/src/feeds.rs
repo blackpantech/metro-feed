@@ -647,7 +647,8 @@ mod command_tests {
     }
 
     /// An Atom `200` result titled "Atom Blog" with two entries whose guids
-    /// derive from the feed URL (entry guids are unique database-wide).
+    /// derive from the feed URL. Dedup is scoped per feed, so the URL prefix
+    /// is not required; it only keeps entries of different feeds distinct.
     #[expect(
         clippy::unnecessary_wraps,
         reason = "mock responder: must match the fallible `Fn(&str) -> Result<_, MetroError>` signature the mock takes"

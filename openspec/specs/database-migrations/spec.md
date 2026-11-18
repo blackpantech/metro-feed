@@ -7,7 +7,7 @@ Enables the application to maintain a SQLite database with a hand-rolled migrati
 ## Requirements
 
 ### Requirement: Database uses bundled SQLite
-The application SHALL use `rusqlite` with the `bundled` feature, compiling SQLite from source. No system SQLite library SHALL be required. The `jiff` feature SHALL be enabled for time handling.
+The application SHALL use `rusqlite` with the `bundled` feature, compiling SQLite from source. No system SQLite library SHALL be required. The `time` feature SHALL be enabled for time handling.
 
 #### Scenario: Build succeeds without system SQLite
 - **WHEN** `cargo build` runs on a system without SQLite installed

@@ -50,7 +50,7 @@ One local database, one config file, one snappy TUI. No server, no account, no m
 | 3 | Folders | Feed folders and saved folders are **separate namespaces**; **flat** (no nesting). |
 | 4 | Read state coupling | A saved item and its source entry have **independent** read state. |
 | 5 | Content prefetch | Article content is cached **at save time**. For feed entries it is cached **only when opened**. |
-| 6 | Default folders | `Inbox` (saved) and `Unsorted` (feeds): auto-created, renamable, not deletable. |
+| 6 | Default folders | `Unsorted` (feeds) and, from M3, `Inbox` (saved): auto-created, neither renamable nor deletable, so items added without `--folder` always land in a predictable place. |
 | 7 | Unread entries vs pruning | Unread entries older than the window are **pruned too**. `prune --dry-run` previews, and a hint warns when unread items are about to expire. |
 | 8 | YouTube | **Channel feeds only.** No playlists in the MVP. `hide_shorts` deferred to post-MVP; Shorts are shown by default. |
 | 9 | Pocket import | Archived status maps to archived. Tags are stored as metadata (not exposed). Items go to a `Pocket import` folder unless `--folder` is given. |
@@ -83,7 +83,7 @@ One local database, one config file, one snappy TUI. No server, no account, no m
 | **SavedItem** | normalized URL, original URL, title, kind (`article`/`video`), folder (exactly one), read flag, archived flag, saved_at, source entry (optional), tags (metadata only) | Independent snapshot: pruning an entry never touches saved items. |
 | **ContentCache** | item or entry ref, extracted text, fetched_at | TTL 90 days. Archived items are exempt (permanent). |
 
-**IDs** are short stable integers with a type prefix: `f12` (feed), `e4031` (entry), `s88` (saved item). The prefix removes ambiguity in `metro read <e-id|s-id>` and is easy to type and script. A bare number is rejected with a hint.
+**IDs** are short stable integers with a type prefix: `fo3` (folder), `f12` (feed), `e4031` (entry), `s88` (saved item). The prefix must match exactly, so `fo3` is never read as a feed ID. JSON output carries the same prefixed strings (`"id": "f12"`), so an ID can be piped straight back into a command. The prefix removes ambiguity in `metro read <e-id|s-id>` and is easy to type and script. A bare number is rejected with a hint.
 
 ## 6. Functional behavior
 
@@ -225,6 +225,9 @@ Notes:
 
 **M3, Saving and reading.** `save` with title fetch, URL normalization and duplicate handling, saved folders, archive, move, rm, `list`, `mark`, content extraction and cache (TTL, archive exemption), `read` and `open`, offline behavior.
 *Exit: save, read offline, archive, and survive a prune.*
+
+**M3.5, CLI completeness.** Items from §6–§7 deferred from M1: `folders remove --move-to <n>` (move a non-empty folder's feeds, then delete it), `feeds remove --keep-entries` (keep entries after unsubscribing, which needs a v001 schema decision before the M4 freeze), a duplicate `feeds add --folder <n>` moves the existing feed instead of only reporting it, a tree view for `feeds list` without `--folder` (human output only; piped and `--json` output stay flat), and the global flags `--config <path>`, `--no-color` (also honors `NO_COLOR`) and `-q/--quiet`.
+*Exit: every command and flag of §7 for feeds and folders behaves as specified, before the CLI 1.0 surface is frozen in M4.*
 
 **M4, Search and CLI 1.0.** Full-text search, Pocket import, full JSON export/import, `--json` everywhere, exit codes, completions, `prune`, `config`, man page and docs.
 *Exit: CLI-only release (v0.5), usable daily and scriptable.*
