@@ -49,6 +49,15 @@
 //!   [`RefreshEvent::Started`] event is sent once, then one
 //!   [`RefreshEvent::FeedFinished`] per fetched feed in completion order.
 //!   Progress is advisory: a dropped receiver never fails the refresh.
+//! - **Pruning** (pruning spec): once every fetched feed has been persisted,
+//!   [`prune_entries`] deletes entries older than
+//!   [`RefreshOptions::prune_window_days`] (default
+//!   [`DEFAULT_WINDOW_DAYS`], 30). It runs whenever the refresh completes,
+//!   including partial failure, all feeds failing, or nothing being due, and
+//!   it prunes **all** feeds, not only the refreshed ones. The count is
+//!   reported in [`RefreshReport::pruned`]. It does not run when the refresh
+//!   aborts with an error (invalid options, unknown target, database error).
+//!   The window is validated before anything is fetched.
 //!
 //! # Testing seam
 //!
@@ -58,8 +67,7 @@
 //!
 //! # Out of scope here
 //!
-//! Pruning after refresh (pruning spec) is wired by the pruning task, and the
-//! CLI maps [`RefreshReport::exit_status`] to process exit codes.
+//! The CLI maps [`RefreshReport::exit_status`] to process exit codes.
 
 mod dedup;
 mod subscribe;
@@ -81,6 +89,7 @@ use crate::MetroError;
 use crate::feeds::feed_id_from_row_id;
 use crate::fetch::{FetchResult, Fetcher};
 use crate::models::{FeedId, FolderId};
+use crate::prune::{DEFAULT_WINDOW_DAYS, prune_entries, validate_window};
 use crate::refresh::writer::{now_unix, store_refresh_failure, store_refresh_success};
 
 pub use subscribe::{FeedPreview, SubscribeOutcome, subscribe_feed};
@@ -144,6 +153,10 @@ pub struct RefreshOptions<'a> {
     pub concurrency: Option<usize>,
     /// Optional channel receiving [`RefreshEvent`]s while the refresh runs.
     pub progress: Option<&'a Sender<RefreshEvent>>,
+    /// Retention window (days) applied by the post-refresh prune; `None`
+    /// means [`DEFAULT_WINDOW_DAYS`] (30, `feeds.window_days`, hardcoded in
+    /// M1). `Some(0)` is a usage error.
+    pub prune_window_days: Option<u32>,
 }
 
 /// Compact per-feed status carried by progress events.
@@ -250,6 +263,8 @@ pub struct RefreshReport {
     pub results: Vec<FeedRefresh>,
     /// Feeds skipped because of backoff, sorted by feed ID.
     pub skipped: Vec<SkippedFeed>,
+    /// Number of entries deleted by the post-refresh prune (all feeds).
+    pub pruned: usize,
 }
 
 impl RefreshReport {
@@ -319,7 +334,8 @@ impl RefreshReport {
 ///
 /// # Errors
 ///
-/// - [`MetroError::Usage`] if `options.concurrency` is `Some(0)`.
+/// - [`MetroError::Usage`] if `options.concurrency` or
+///   `options.prune_window_days` is `Some(0)`.
 /// - [`MetroError::NotFound`] if a [`RefreshTarget::Feeds`] ID does not
 ///   exist (nothing is fetched).
 /// - [`MetroError::Generic`] if a database operation fails or a worker
@@ -332,6 +348,8 @@ pub fn refresh_feeds<F: FeedFetcher>(
     options: &RefreshOptions<'_>,
 ) -> Result<RefreshReport, MetroError> {
     let pool_size = resolve_concurrency(options.concurrency)?;
+    let window_days = options.prune_window_days.unwrap_or(DEFAULT_WINDOW_DAYS);
+    validate_window(window_days)?;
     let candidates = load_candidates(conn, target)?;
     let (due, mut skipped) = partition_by_backoff(candidates, now_unix());
     let workers = pool_size.min(due.len());
@@ -349,10 +367,15 @@ pub fn refresh_feeds<F: FeedFetcher>(
     results.sort_by_key(|result| result.feed_id.inner());
     skipped.sort_by_key(|skipped| skipped.feed_id.inner());
 
+    // Runs after every entry has been inserted (pruning spec: "Pruning runs
+    // after refresh", also on partial failure).
+    let pruned = prune_entries(conn, window_days)?;
+
     Ok(RefreshReport {
         workers,
         results,
         skipped,
+        pruned,
     })
 }
 

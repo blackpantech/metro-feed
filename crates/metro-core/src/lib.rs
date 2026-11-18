@@ -2,8 +2,8 @@
 //!
 //! Provides error types, configuration loading, database connectivity, data
 //! models, the folder management API, the feed management API, URL
-//! autodiscovery, HTTP feed fetching, and the threaded refresh pipeline
-//! (including subscribe-time fetching).
+//! autodiscovery, HTTP feed fetching, the threaded refresh pipeline
+//! (including subscribe-time fetching), and age-based entry pruning.
 
 pub mod config;
 pub mod db;
@@ -13,6 +13,7 @@ pub mod feeds;
 pub mod fetch;
 pub mod folders;
 pub mod models;
+pub mod prune;
 pub mod refresh;
 
 #[cfg(feature = "test-utils")]
