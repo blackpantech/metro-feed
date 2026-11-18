@@ -26,6 +26,9 @@ CREATE TABLE IF NOT EXISTS feeds (
 );
 
 -- Entries table: individual items from feeds.
+-- `guid` holds the refresh dedup key (guid -> url -> content hash). It is
+-- unique per feed, not globally: two feeds publishing the same guid each keep
+-- their own entry (design D2).
 CREATE TABLE IF NOT EXISTS entries (
     id INTEGER PRIMARY KEY,
     feed_id INTEGER NOT NULL,
@@ -39,12 +42,14 @@ CREATE TABLE IF NOT EXISTS entries (
     is_read INTEGER NOT NULL DEFAULT 0,
     first_seen INTEGER DEFAULT 0,
     FOREIGN KEY (feed_id) REFERENCES feeds(id) ON DELETE CASCADE,
-    UNIQUE (guid)
+    UNIQUE (feed_id, guid)
 );
 
 -- Performance indexes.
 CREATE INDEX IF NOT EXISTS idx_feeds_folder_id ON feeds(folder_id);
 CREATE INDEX IF NOT EXISTS idx_entries_feed_id ON entries(feed_id);
+-- Backs the per-feed URL dedup guard of the refresh writer.
+CREATE INDEX IF NOT EXISTS idx_entries_feed_url ON entries(feed_id, url);
 CREATE INDEX IF NOT EXISTS idx_entries_published ON entries(published);
 CREATE INDEX IF NOT EXISTS idx_entries_is_read ON entries(is_read);
 CREATE INDEX IF NOT EXISTS idx_feeds_next_retry ON feeds(next_retry);

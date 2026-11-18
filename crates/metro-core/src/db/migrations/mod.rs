@@ -192,13 +192,16 @@ mod tests {
         assert_eq!(count_after, 0);
     }
 
+    /// `entries` dedup keys are unique per feed (design D2): a duplicate
+    /// guid within one feed is rejected, the same guid in another feed is
+    /// accepted.
     #[test]
-    fn test_migration_unique_guid_constraint() {
+    fn test_migration_unique_guid_per_feed_constraint() {
         let mut conn = open_in_memory().unwrap();
 
         run_migrations(&mut conn).unwrap();
 
-        // Insert a folder and feed
+        // Insert a folder and two feeds
         conn.execute(
             "INSERT INTO folders (id, name, kind) VALUES (1, 'Test', 'feeds')",
             [],
@@ -206,6 +209,11 @@ mod tests {
         .unwrap();
         conn.execute(
             "INSERT INTO feeds (id, url, title, site_url, kind, folder_id) VALUES (1, 'https://example.com/feed', 'Test', 'https://example.com', 'rss', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO feeds (id, url, title, site_url, kind, folder_id) VALUES (2, 'https://other.example.com/feed', 'Other', 'https://other.example.com', 'rss', 1)",
             [],
         )
         .unwrap();
@@ -217,15 +225,58 @@ mod tests {
         )
         .unwrap();
 
-        // Try to insert duplicate guid (should fail)
+        // Try to insert duplicate guid in the same feed (should fail)
         let result = conn.execute(
             "INSERT INTO entries (feed_id, guid, url, title, is_read) VALUES (1, 'unique-guid', 'https://example.com/2', 'Entry 2', 0)",
             [],
         );
-
         assert!(
             result.is_err(),
-            "UNIQUE constraint should prevent duplicate guid"
+            "UNIQUE constraint should prevent duplicate guid within a feed"
+        );
+
+        // The same guid in another feed is a distinct entry (should succeed)
+        let result = conn.execute(
+            "INSERT INTO entries (feed_id, guid, url, title, is_read) VALUES (2, 'unique-guid', 'https://example.com/1', 'Entry 1', 0)",
+            [],
+        );
+        assert!(
+            result.is_ok(),
+            "the same guid in another feed should be accepted: {result:?}"
+        );
+    }
+
+    /// The `entries` table carries a unique index on exactly
+    /// `(feed_id, guid)`, and no unique index on `guid` alone.
+    #[test]
+    fn test_migration_entries_unique_index_is_feed_scoped() {
+        let mut conn = open_in_memory().unwrap();
+
+        run_migrations(&mut conn).unwrap();
+
+        let unique_indexes: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_index_list('entries') WHERE \"unique\" = 1")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        let column_sets: Vec<Vec<String>> = unique_indexes
+            .iter()
+            .map(|index| {
+                conn.prepare("SELECT name FROM pragma_index_info(?1) ORDER BY seqno")
+                    .unwrap()
+                    .query_map([index], |row| row.get(0))
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap()
+            })
+            .collect();
+
+        assert_eq!(
+            column_sets,
+            vec![vec!["feed_id".to_string(), "guid".to_string()]]
         );
     }
 
@@ -248,6 +299,7 @@ mod tests {
 
         assert!(indexes.contains(&"idx_feeds_folder_id".to_string()));
         assert!(indexes.contains(&"idx_entries_feed_id".to_string()));
+        assert!(indexes.contains(&"idx_entries_feed_url".to_string()));
         assert!(indexes.contains(&"idx_entries_published".to_string()));
         assert!(indexes.contains(&"idx_entries_is_read".to_string()));
         assert!(indexes.contains(&"idx_feeds_next_retry".to_string()));

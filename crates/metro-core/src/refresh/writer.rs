@@ -33,12 +33,14 @@
 //!
 //! # Entry deduplication
 //!
-//! Each entry is inserted with `INSERT OR IGNORE` keyed on
-//! [`dedup_key`] (guid → url → content hash) through the `UNIQUE(guid)`
-//! constraint (D2). In addition, an entry whose non-empty URL already exists
-//! in the `entries` table is skipped even when its guid is new, which is the
-//! spec's "duplicate url is skipped" rule. Both checks are global across
-//! feeds, matching the global `UNIQUE(guid)` constraint of the v001 schema.
+//! Deduplication is scoped **per feed**: two feeds that publish the same
+//! guid or URL each keep their own entry. Each entry is inserted with
+//! `INSERT OR IGNORE` keyed on [`dedup_key`] (guid → url → content hash)
+//! through the `UNIQUE(feed_id, guid)` constraint (D2). In addition, an entry
+//! whose non-empty URL already exists **in the same feed** is skipped even
+//! when its guid is new, which is the spec's "duplicate url is skipped" rule;
+//! the guard is served by the `idx_entries_feed_url` index on
+//! `entries(feed_id, url)`.
 //!
 //! New entries get `first_seen = now` (the pruning fallback when `published`
 //! is missing), `is_read = 0`, and an empty `url` / `title` when the feed
@@ -52,14 +54,18 @@ use crate::fetch::{FetchResult, FetchStatus};
 use crate::models::FeedId;
 use crate::refresh::dedup::{dedup_key, entry_url};
 
-/// Insert one entry unless its key or (non-empty) URL is already stored.
+/// Insert one entry unless its key or (non-empty) URL is already stored for
+/// the same feed.
 ///
-/// `?3` (the URL) is reused in the `NOT EXISTS` guard; the empty string means
-/// "no URL" and never deduplicates.
+/// `?1` (the feed) and `?3` (the URL) are reused in the `NOT EXISTS` guard,
+/// so an identical URL in another feed never blocks the insert. The empty
+/// string means "no URL" and never deduplicates. The key half of the dedup is
+/// the `UNIQUE(feed_id, guid)` constraint behind `INSERT OR IGNORE`.
 const INSERT_ENTRY_SQL: &str = "INSERT OR IGNORE INTO entries \
      (feed_id, guid, url, title, author, published, summary, content, first_seen) \
      SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9 \
-     WHERE ?3 = '' OR NOT EXISTS (SELECT 1 FROM entries WHERE url = ?3)";
+     WHERE ?3 = '' \
+        OR NOT EXISTS (SELECT 1 FROM entries WHERE feed_id = ?1 AND url = ?3)";
 
 /// Current time as Unix seconds, the unit of every timestamp column.
 pub(crate) fn now_unix() -> i64 {
