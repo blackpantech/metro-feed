@@ -1,13 +1,15 @@
 //! Metro core library.
 //!
 //! Provides error types, configuration loading, database connectivity, data
-//! models, the folder management API, the feed management API, URL
+//! models, the folder management API, the feed management API, the entry
+//! listing API, URL
 //! autodiscovery, HTTP feed fetching, the threaded refresh pipeline
 //! (including subscribe-time fetching), and age-based entry pruning.
 
 pub mod config;
 pub mod db;
 pub mod discovery;
+pub mod entries;
 pub mod error;
 pub mod feeds;
 pub mod fetch;
