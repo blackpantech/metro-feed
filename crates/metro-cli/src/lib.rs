@@ -488,8 +488,9 @@ mod end_to_end_tests {
                 ("/feed.xml", "application/rss+xml", rss()),
                 ("/broken.xml", "application/xml", "not a feed".to_string()),
             ],
-            // dry run: 2, broken feed: 2, missing: 1 (discovery only)
-            5,
+            // One request each: a direct feed (dry run), a broken feed, and
+            // the 404 are all answered by their first response.
+            3,
         );
 
         let run = metro(
@@ -515,6 +516,53 @@ mod end_to_end_tests {
         let run = metro(&db, &["feeds", "add", &format!("{base}/missing.xml")]);
         assert_eq!(run.code, 4, "{}", run.err);
         assert_eq!(metro(&db, &["feeds", "list"]).out, "");
+    }
+
+    /// A feed is detected from its body whatever its `Content-Type`, with a
+    /// single request; a page without a feed link still exits 3.
+    #[test]
+    fn test_feeds_add_detects_feeds_by_body_end_to_end() {
+        let db = TempDb(temp_db_path());
+        let page = "<html><head><title>No feed</title></head><body></body></html>";
+        // Exactly one request per `feeds add`: a second request for the
+        // same feed would be refused once these three are served.
+        let base = serve(
+            vec![
+                ("/html-feed", "text/html; charset=utf-8", rss()),
+                ("/plain-feed", "text/plain", rss()),
+                ("/page", "text/html", page.to_string()),
+            ],
+            3,
+        );
+
+        for path in ["/html-feed", "/plain-feed"] {
+            let run = metro(&db, &["feeds", "add", &format!("{base}{path}")]);
+            assert_eq!(run.code, 0, "{path}: {}", run.err);
+            assert!(run.out.starts_with("Subscribed to f"), "{}", run.out);
+            assert!(
+                run.out.contains("\"Local Blog\" (rss, 1 new entry)"),
+                "{}",
+                run.out
+            );
+        }
+
+        let run = metro(&db, &["feeds", "add", &format!("{base}/page")]);
+        assert_eq!(run.code, 3, "{}", run.err);
+        assert!(run.err.contains("no feed found"), "{}", run.err);
+
+        let run = metro(&db, &["feeds", "list", "--folder", "Unsorted"]);
+        assert_eq!(
+            run.out,
+            format!(
+                "f1\tLocal Blog\t{base}/html-feed\n\
+                 f2\tLocal Blog\t{base}/plain-feed\n"
+            )
+        );
+
+        // Dedup happens before any request: the server is closed by now.
+        let run = metro(&db, &["feeds", "add", &format!("{base}/html-feed")]);
+        assert_eq!(run.code, 0, "{}", run.err);
+        assert!(run.out.starts_with("Already subscribed: f1"), "{}", run.out);
     }
 
     #[test]
