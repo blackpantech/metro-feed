@@ -1,8 +1,28 @@
 //! Feed URL autodiscovery for Metro.
 //!
 //! This module implements the `autodiscovery` capability of the M1 milestone:
-//! given a blog homepage URL, it fetches the HTML and extracts the first feed
-//! link advertised through `<link rel="alternate">` tags.
+//! given the URL a user typed (a feed URL or a blog homepage), it makes
+//! **one** request and works out which feed it designates.
+//!
+//! # Parse first, then scan
+//!
+//! The first response is classified by its **body**, whatever its
+//! `Content-Type` (servers routinely serve feeds as `text/html`,
+//! `text/plain`, or `application/octet-stream`):
+//!
+//! 1. The body is parsed as a feed ([`FetchedDocument::into_feed`]). On
+//!    success the URL is a direct feed and the parsed response is returned as
+//!    [`Discovery::Feed`], ready to be used as the subscription fetch (entries,
+//!    metadata, and the response `ETag` / `Last-Modified`), so the feed is
+//!    never downloaded twice.
+//! 2. Otherwise the same body is scanned as HTML for a `<link
+//!    rel="alternate">` feed link, returned as [`Discovery::Link`]; the caller
+//!    then fetches that URL.
+//! 3. When neither works, the error depends on what the server claimed: a
+//!    response whose `Content-Type` is a feed media type
+//!    (`FEED_CONTENT_TYPES`) is a broken feed and keeps the
+//!    [`MetroError::Generic`] parse error, anything else is a page without a
+//!    feed ([`MetroError::NotFound`]).
 //!
 //! # Supported feed link types
 //!
@@ -25,48 +45,48 @@
 //! the markup. Relative `href` values are resolved against the URL of the
 //! response after redirects, which is what a browser would do. Accepted
 //! feed URLs are normalized with [`normalize_url`] so they match the form
-//! stored by the feed management API.
-//!
-//! # Direct feed URLs
-//!
-//! A homepage URL that already points at a feed is returned unchanged. This is
-//! detected from the response `Content-Type`: feed media types (`rss+xml`,
-//! `atom+xml`, `feed+json`, `json`, `xml`, and `text/xml`) mark the response as
-//! a feed rather than an HTML document.
+//! stored by the feed management API. The body is decoded as UTF-8 for the
+//! scan, replacing invalid sequences.
 //!
 //! # Errors
 //!
-//! - [`MetroError::Usage`] for an empty or non-`http(s)` homepage URL.
+//! - [`MetroError::Usage`] for an empty or non-`http(s)` URL (before any
+//!   request).
 //! - [`MetroError::Network`] when the request fails, including the 15-second
-//!   timeout, DNS failures, TLS failures, and non-success HTTP status codes.
-//! - [`MetroError::NotFound`] when the response is HTML but advertises no
-//!   supported feed link.
-//! - [`MetroError::Generic`] when the HTML document cannot be prepared for
+//!   timeout, DNS failures, TLS failures, too many redirects, an oversized
+//!   body, and non-success HTTP status codes.
+//! - [`MetroError::NotFound`] when the body is neither a feed nor a page
+//!   advertising a supported feed link.
+//! - [`MetroError::Generic`] when a response served with a feed media type
+//!   does not parse as a feed, or the HTML document cannot be prepared for
 //!   selection.
 //!
-//! # Timeout
+//! # Limits
 //!
-//! Autodiscovery fetches a single HTML document, so it uses the 15-second
-//! timeout pinned by the autodiscovery spec instead of the longer one used for
-//! feed downloads.
+//! The request goes through a [`Fetcher`] built from [`discovery_config`]:
+//! the feed-fetching limits (body cap, redirect limit, User-Agent) plus the
+//! 15-second overall timeout pinned by the autodiscovery spec
+//! ([`DISCOVERY_TIMEOUT`]). Since the first response may be used as the
+//! feed download, it obeys the same body cap and redirect limit as any feed
+//! fetch.
 //!
 //! # Testing seam
 //!
 //! Callers that orchestrate discovery (such as
 //! [`crate::refresh::subscribe_url`], used by `metro feeds add`) depend on
-//! the [`FeedDiscoverer`] trait rather than on [`discover_feed_url`]
-//! directly (dependency inversion, like `FeedFetcher` for fetching).
-//! [`HttpDiscoverer`] is the production implementation; tests inject mocks
-//! and never hit the network.
+//! the [`FeedDiscoverer`] trait rather than on [`HttpDiscoverer`] directly
+//! (dependency inversion, like `FeedFetcher` for fetching). Tests inject
+//! mocks, or point an [`HttpDiscoverer`] at a local server, and never hit
+//! the network.
 
 use std::time::Duration;
 
 use scraper::{Html, Selector};
-use ureq::ResponseExt;
 use url::Url;
 
 use crate::MetroError;
 use crate::feeds::normalize_url;
+use crate::fetch::{FetchConfig, FetchResult, FetchedDocument, Fetcher, NotAFeed};
 
 /// Media types accepted on `<link type="...">` tags for feed autodiscovery.
 const FEED_LINK_TYPES: &[&str] = &[
@@ -75,11 +95,14 @@ const FEED_LINK_TYPES: &[&str] = &[
     "application/feed+json",
 ];
 
-/// Response content types that mean the fetched URL is already a feed.
+/// Response content types with which a server claims to serve a feed.
 ///
-/// XML and JSON are included because many feed servers omit the more specific
-/// `rss+xml`/`atom+xml`/`feed+json` spelling. HTML content types are
-/// deliberately absent so ordinary pages are parsed for feed links.
+/// They no longer decide whether a response **is** a feed (the body does,
+/// see [Parse first, then scan](self#parse-first-then-scan)); they only
+/// decide which error a response that is neither a feed nor a page with a
+/// feed link gets: a broken feed (parse error) rather than "no feed found".
+/// XML and JSON are included because many feed servers omit the more
+/// specific `rss+xml`/`atom+xml`/`feed+json` spelling.
 const FEED_CONTENT_TYPES: &[&str] = &[
     "application/rss+xml",
     "application/atom+xml",
@@ -89,91 +112,134 @@ const FEED_CONTENT_TYPES: &[&str] = &[
     "text/xml",
 ];
 
-/// Timeout applied to the autodiscovery HTTP request.
-const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(15);
+/// Overall timeout applied to the autodiscovery HTTP request.
+pub const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Polite User-Agent sent with autodiscovery requests.
-const USER_AGENT: &str = "metro-feed/0.1 (terminal; local-first)";
+/// What the URL given to [`FeedDiscoverer::discover`] turned out to be.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Discovery {
+    /// The URL serves a feed. Carries the parsed first response
+    /// ([`FetchStatus::Modified`](crate::fetch::FetchStatus::Modified), with
+    /// its validators), to be used as the subscription fetch instead of
+    /// requesting the URL again.
+    Feed(FetchResult),
+    /// The URL serves a page advertising this (normalized) feed URL, which
+    /// still has to be fetched.
+    Link(String),
+}
 
 /// Source of autodiscovery results, abstracted for dependency injection.
 ///
-/// The contract is exactly that of [`discover_feed_url`]: return the feed URL
-/// advertised by (or equal to) `homepage_url`, or the documented
-/// [`MetroError`] variants.
+/// The contract is that of [`HttpDiscoverer`]: classify the response of
+/// `url` (see [Parse first, then scan](self#parse-first-then-scan)) or
+/// return the documented [`MetroError`] variants.
 pub trait FeedDiscoverer {
-    /// Resolve `homepage_url` to a feed URL.
+    /// Resolve `url` to a feed: the feed itself, or the feed URL it links to.
     ///
     /// # Errors
     ///
-    /// See [`discover_feed_url`].
-    fn discover(&self, homepage_url: &str) -> Result<String, MetroError>;
+    /// See the [module documentation](self#errors).
+    fn discover(&self, url: &str) -> Result<Discovery, MetroError>;
 }
 
-/// Production [`FeedDiscoverer`]: performs the HTTP request with
-/// [`discover_feed_url`].
-#[derive(Debug, Clone, Copy, Default)]
-pub struct HttpDiscoverer;
+/// Limits for the autodiscovery request: [`FetchConfig::default`] plus the
+/// [`DISCOVERY_TIMEOUT`] overall deadline.
+#[must_use]
+pub fn discovery_config() -> FetchConfig {
+    FetchConfig {
+        total_timeout: Some(DISCOVERY_TIMEOUT),
+        ..FetchConfig::default()
+    }
+}
+
+/// Production [`FeedDiscoverer`]: one HTTP request through a [`Fetcher`].
+#[derive(Debug)]
+pub struct HttpDiscoverer {
+    /// Fetcher performing the single autodiscovery request.
+    fetcher: Fetcher,
+}
+
+impl Default for HttpDiscoverer {
+    /// A discoverer using [`discovery_config`].
+    fn default() -> Self {
+        Self::new(discovery_config())
+    }
+}
+
+impl HttpDiscoverer {
+    /// Build a discoverer with custom limits (tests use short timeouts).
+    #[must_use]
+    pub fn new(config: FetchConfig) -> Self {
+        Self {
+            fetcher: Fetcher::new(config),
+        }
+    }
+}
 
 impl FeedDiscoverer for HttpDiscoverer {
-    fn discover(&self, homepage_url: &str) -> Result<String, MetroError> {
-        discover_feed_url(homepage_url)
+    fn discover(&self, url: &str) -> Result<Discovery, MetroError> {
+        // Validated here for the homepage-specific usage messages.
+        parse_http_url(url)?;
+        let document = self.fetcher.get(url)?;
+        classify(document, url.trim())
     }
 }
 
 /// Discover a feed URL from a blog homepage.
 ///
-/// Fetches `homepage_url`, parses the returned HTML, and returns the first
-/// `<link rel="alternate">` feed URL it advertises. When the URL already points
-/// at a feed (as reported by the response `Content-Type`), the input URL is
-/// returned unchanged.
+/// Convenience wrapper around [`HttpDiscoverer::default`]: returns the input
+/// URL (trimmed) when it serves a feed, else the first feed link its page
+/// advertises. Callers that go on to fetch the feed should use
+/// [`FeedDiscoverer::discover`] instead, which hands back the already
+/// downloaded feed and so saves a request.
 ///
 /// # Errors
 ///
-/// - [`MetroError::Usage`] if the homepage URL is empty, malformed, or does
-///   not use the `http`/`https` scheme.
-/// - [`MetroError::Network`] if the request times out or otherwise fails.
-/// - [`MetroError::NotFound`] if the page advertises no supported feed link.
-/// - [`MetroError::Generic`] if the HTML cannot be parsed for selection.
+/// See the [module documentation](self#errors).
 pub fn discover_feed_url(homepage_url: &str) -> Result<String, MetroError> {
-    let homepage = parse_http_url(homepage_url)?;
+    match HttpDiscoverer::default().discover(homepage_url)? {
+        Discovery::Feed(_) => Ok(homepage_url.trim().to_string()),
+        Discovery::Link(feed_url) => Ok(feed_url),
+    }
+}
 
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(DISCOVERY_TIMEOUT))
-        .user_agent(USER_AGENT)
-        .build()
-        .into();
+/// Classify a downloaded response: feed, page with a feed link, or error.
+///
+/// `requested_url` only appears in the "no feed found" message. See
+/// [Parse first, then scan](self#parse-first-then-scan).
+///
+/// # Errors
+///
+/// [`MetroError::Generic`] for a broken feed (served with a feed media type)
+/// or an unusable selector, [`MetroError::NotFound`] when the body is
+/// neither a feed nor a page with a feed link.
+fn classify(document: FetchedDocument, requested_url: &str) -> Result<Discovery, MetroError> {
+    let NotAFeed {
+        error: parse_error,
+        document,
+    } = match document.into_feed() {
+        Ok(result) => return Ok(Discovery::Feed(result)),
+        Err(failure) => failure,
+    };
 
-    let mut response = agent
-        .get(homepage.as_str())
-        .call()
-        .map_err(|error| network_error(homepage.as_str(), &error))?;
+    let html = String::from_utf8_lossy(&document.body);
+    if let Some(feed_url) = find_feed_url(&html, &document.final_url)? {
+        return Ok(Discovery::Link(feed_url));
+    }
 
-    let content_type = response
-        .headers()
-        .get("content-type")
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
-
-    if content_type
+    if document
+        .content_type
         .as_deref()
         .is_some_and(|value| matches_media_type(value, FEED_CONTENT_TYPES))
     {
-        return Ok(homepage_url.trim().to_string());
+        // The server claims a feed but sent something unparsable: report the
+        // parse error rather than a misleading "no feed found".
+        return Err(parse_error);
     }
 
-    // Relative links must be resolved against the final URL, which can differ
-    // from the requested one when the server redirected.
-    let effective_url = response.get_uri().to_string();
-    let html = response
-        .body_mut()
-        .read_to_string()
-        .map_err(|error| network_error(homepage.as_str(), &error))?;
-
-    find_feed_url(&html, &effective_url)?.ok_or_else(|| {
-        MetroError::NotFound(format!(
-            "no feed found at {homepage_url}: the page advertises no RSS, Atom, or JSON Feed link"
-        ))
-    })
+    Err(MetroError::NotFound(format!(
+        "no feed found at {requested_url}: the page advertises no RSS, Atom, or JSON Feed link"
+    )))
 }
 
 /// Parse and validate an absolute `http(s)` URL.
@@ -207,11 +273,6 @@ fn parse_http_url(raw: &str) -> Result<Url, MetroError> {
     }
 
     Ok(url)
-}
-
-/// Map a `ureq` failure to a network error with request context.
-fn network_error(url: &str, error: &ureq::Error) -> MetroError {
-    MetroError::Network(format!("failed to fetch {url}: {error}"))
 }
 
 /// Return `true` when a media type matches one of `supported`.
@@ -292,6 +353,8 @@ fn is_alternate(token: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::fetch::FetchStatus;
 
     /// Wrap a fragment of markup in a minimal HTML document.
     fn document(head: &str) -> String {
@@ -443,6 +506,173 @@ mod tests {
         ));
     }
 
+    const RSS: &str = "<?xml version=\"1.0\"?><rss version=\"2.0\"><channel>\
+        <title>Local Blog</title><link>/</link><description>d</description>\
+        <item><title>One</title><link>/1</link><guid>g1</guid></item>\
+        </channel></rss>";
+
+    /// Spawn a local HTTP server answering every request with `200 OK`, the
+    /// given `Content-Type`, an `ETag`, and `body`. Returns the base URL and
+    /// a counter of requests served.
+    fn serve(
+        content_type: &'static str,
+        body: &'static str,
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        serve_status("200 OK", content_type, body)
+    }
+
+    /// [`serve`] with an explicit status line.
+    fn serve_status(
+        status: &'static str,
+        content_type: &'static str,
+        body: &'static str,
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::TcpListener;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let served = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&served);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let mut reader = BufReader::new(&stream);
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                        break;
+                    }
+                }
+                counter.fetch_add(1, Ordering::SeqCst);
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nETag: \"v1\"\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        (base, served)
+    }
+
+    /// Discoverer with short timeouts so failing tests finish quickly.
+    fn discoverer() -> HttpDiscoverer {
+        HttpDiscoverer::new(FetchConfig {
+            connect_timeout: Duration::from_secs(2),
+            read_timeout: Duration::from_secs(2),
+            ..discovery_config()
+        })
+    }
+
+    fn served(counter: &std::sync::atomic::AtomicUsize) -> usize {
+        counter.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[test]
+    fn test_discovery_config_adds_overall_timeout() {
+        let config = discovery_config();
+        assert_eq!(config.total_timeout, Some(Duration::from_secs(15)));
+        assert_eq!(
+            FetchConfig {
+                total_timeout: None,
+                ..config
+            },
+            FetchConfig::default()
+        );
+    }
+
+    /// A feed is recognized by its body whatever the `Content-Type`, with a
+    /// single request, and comes back parsed with its validators.
+    #[test]
+    fn test_direct_feed_is_detected_whatever_the_content_type() {
+        for content_type in [
+            "text/html; charset=utf-8",
+            "text/plain",
+            "application/octet-stream",
+            "application/rss+xml",
+        ] {
+            let (base, counter) = serve(content_type, RSS);
+
+            let found = discoverer().discover(&format!("{base}/feed")).unwrap();
+
+            let Discovery::Feed(result) = found else {
+                panic!("expected a feed for {content_type}, got {found:?}");
+            };
+            assert_eq!(result.status, FetchStatus::Modified);
+            assert_eq!(
+                result.feed.and_then(|feed| feed.title).as_deref(),
+                Some("Local Blog")
+            );
+            assert_eq!(result.entries.len(), 1);
+            // Relative entry links resolve against the served URL.
+            assert_eq!(
+                result.entries[0].url.as_deref(),
+                Some(format!("{base}/1").as_str())
+            );
+            assert_eq!(result.etag.as_deref(), Some("\"v1\""));
+            assert_eq!(served(&counter), 1, "{content_type}");
+        }
+    }
+
+    #[test]
+    fn test_html_page_with_feed_link_is_discovered() {
+        let (base, counter) = serve(
+            "text/html",
+            "<html><head><link rel=\"alternate\" type=\"application/atom+xml\" \
+             href=\"/atom.xml\"></head></html>",
+        );
+
+        let found = discoverer().discover(&format!("{base}/")).unwrap();
+
+        assert_eq!(found, Discovery::Link(format!("{base}/atom.xml")));
+        assert_eq!(served(&counter), 1);
+    }
+
+    #[test]
+    fn test_html_page_without_feed_link_is_not_found() {
+        let (base, _counter) = serve("text/html", "<html><head></head><body>hi</body></html>");
+
+        let error = discoverer().discover(&base).unwrap_err();
+
+        assert!(matches!(&error, MetroError::NotFound(message) if message.contains("no feed")));
+        assert_eq!(error.exit_code(), 3);
+    }
+
+    /// A body served as a feed that does not parse keeps the parse error
+    /// (exit 1); the same body served as anything else is "no feed found".
+    #[test]
+    fn test_broken_feed_keeps_parse_error() {
+        let (base, _counter) = serve("application/xml", "not a feed");
+        let error = discoverer().discover(&base).unwrap_err();
+        assert!(matches!(&error, MetroError::Generic(message) if message.contains("parse")));
+        assert_eq!(error.exit_code(), 1);
+
+        let (base, _counter) = serve("text/plain", "not a feed");
+        let error = discoverer().discover(&base).unwrap_err();
+        assert_eq!(error.exit_code(), 3);
+    }
+
+    #[test]
+    fn test_http_error_status_is_network_error() {
+        let (base, _counter) = serve_status("404 Not Found", "text/html", "missing");
+
+        let error = discoverer().discover(&base).unwrap_err();
+
+        assert!(matches!(&error, MetroError::Network(message) if message.contains("HTTP 404")));
+        assert_eq!(error.exit_code(), 4);
+    }
+
+    #[test]
+    fn test_discover_feed_url_returns_input_for_direct_feed() {
+        let (base, _counter) = serve("text/plain", RSS);
+        let url = format!("{base}/feed.xml");
+
+        assert_eq!(discover_feed_url(&format!(" {url} ")).unwrap(), url);
+    }
+
     #[test]
     fn test_discover_rejects_invalid_urls_without_network() {
         assert!(matches!(discover_feed_url(""), Err(MetroError::Usage(_))));
@@ -452,6 +682,10 @@ mod tests {
         ));
         assert!(matches!(
             discover_feed_url("ftp://example.com"),
+            Err(MetroError::Usage(_))
+        ));
+        assert!(matches!(
+            HttpDiscoverer::default().discover("not a url"),
             Err(MetroError::Usage(_))
         ));
     }

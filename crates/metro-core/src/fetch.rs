@@ -26,6 +26,19 @@
 //! - Response bodies capped at [`MAX_BODY_BYTES`].
 //! - At most [`MAX_REDIRECTS`] redirects; exceeding it is an error.
 //! - A polite [`USER_AGENT`] on every request.
+//! - No overall deadline ([`FetchConfig::total_timeout`] is `None`). The
+//!   autodiscovery request sets one (15 seconds, see
+//!   [`crate::discovery`]) on top of the other limits.
+//!
+//! # Raw documents
+//!
+//! [`Fetcher::get`] performs an unconditional GET under the same limits and
+//! returns the raw [`FetchedDocument`] (final URL after redirects,
+//! `Content-Type`, validators, body) without parsing it. Autodiscovery uses it
+//! so the first response of `metro feeds add` can be tried as a feed
+//! ([`FetchedDocument::into_feed`]) and, when that fails, scanned as HTML,
+//! without a second request. [`Fetcher::fetch`] is built on the same request
+//! path, so both apply identical limits, status mapping, and parsing.
 //!
 //! # Parsed fields
 //!
@@ -100,6 +113,9 @@ pub struct FetchConfig {
     pub max_body_bytes: u64,
     /// Maximum number of redirects followed; more is an error.
     pub max_redirects: u32,
+    /// Optional deadline for the whole request (connect, redirects, headers,
+    /// and body together). `None` means only the per-phase timeouts apply.
+    pub total_timeout: Option<Duration>,
 }
 
 impl Default for FetchConfig {
@@ -109,6 +125,7 @@ impl Default for FetchConfig {
             read_timeout: READ_TIMEOUT,
             max_body_bytes: MAX_BODY_BYTES,
             max_redirects: MAX_REDIRECTS,
+            total_timeout: None,
         }
     }
 }
@@ -178,6 +195,77 @@ impl FetchResult {
     }
 }
 
+/// A successful (`2xx`) response, downloaded but not parsed.
+///
+/// Returned by [`Fetcher::get`]. The body has already been read under the
+/// fetcher's size cap and timeouts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FetchedDocument {
+    /// URL of the response after redirects; relative links resolve against
+    /// it.
+    pub final_url: String,
+    /// Response `Content-Type` header, if present and non-empty.
+    pub content_type: Option<String>,
+    /// Response `ETag`, to store for the next conditional request.
+    pub etag: Option<String>,
+    /// Response `Last-Modified`, to store for the next conditional request.
+    pub last_modified: Option<String>,
+    /// Raw response body.
+    pub body: Vec<u8>,
+}
+
+impl FetchedDocument {
+    /// Parse the body as a feed, turning the document into the
+    /// [`FetchResult`] a [`Fetcher::fetch`] of the same response would have
+    /// produced ([`FetchStatus::Modified`], the response validators, links
+    /// resolved against [`FetchedDocument::final_url`]).
+    ///
+    /// # Errors
+    ///
+    /// When the body is not a supported feed, returns a [`NotAFeed`] that
+    /// carries the [`MetroError::Generic`] parse error **and** gives the
+    /// document back, so the caller can still inspect it (for example scan
+    /// it as HTML) without downloading it again.
+    pub fn into_feed(self) -> Result<FetchResult, NotAFeed> {
+        match parse_feed(&self.body, Some(&self.final_url)) {
+            Ok((feed, entries)) => Ok(FetchResult {
+                status: FetchStatus::Modified,
+                feed: Some(feed),
+                entries,
+                etag: self.etag,
+                last_modified: self.last_modified,
+            }),
+            Err(error) => Err(NotAFeed {
+                error,
+                document: Box::new(self),
+            }),
+        }
+    }
+}
+
+/// Failure of [`FetchedDocument::into_feed`]: the parse error plus the
+/// untouched document.
+#[derive(Debug)]
+pub struct NotAFeed {
+    /// The [`MetroError::Generic`] parse error.
+    pub error: MetroError,
+    /// The document whose body failed to parse (boxed to keep the `Err`
+    /// variant small).
+    pub document: Box<FetchedDocument>,
+}
+
+/// Outcome of the shared request path behind [`Fetcher::fetch`] and
+/// [`Fetcher::get`].
+enum RawResponse {
+    /// `304 Not Modified`, with the validators the server repeated (if any).
+    NotModified {
+        etag: Option<String>,
+        last_modified: Option<String>,
+    },
+    /// A `2xx` response with its body downloaded.
+    Document(FetchedDocument),
+}
+
 /// Reusable feed fetcher.
 ///
 /// A `Fetcher` owns a configured [`ureq::Agent`], so reusing one across many
@@ -211,6 +299,7 @@ impl Fetcher {
             // mapped precisely instead of surfacing as opaque errors.
             .http_status_as_error(false)
             .user_agent(USER_AGENT)
+            .timeout_global(config.total_timeout)
             .build()
             .into();
 
@@ -237,6 +326,57 @@ impl Fetcher {
         etag: Option<&str>,
         last_modified: Option<&str>,
     ) -> Result<FetchResult, MetroError> {
+        match self.request(url, etag, last_modified)? {
+            RawResponse::NotModified {
+                etag: response_etag,
+                last_modified: response_last_modified,
+            } => Ok(FetchResult {
+                status: FetchStatus::NotModified,
+                feed: None,
+                entries: Vec::new(),
+                etag: response_etag.or_else(|| etag.map(str::to_owned)),
+                last_modified: response_last_modified.or_else(|| last_modified.map(str::to_owned)),
+            }),
+            RawResponse::Document(document) => {
+                document.into_feed().map_err(|failure| failure.error)
+            }
+        }
+    }
+
+    /// Download `url` unconditionally without parsing the body.
+    ///
+    /// Applies the same limits and status mapping as [`Fetcher::fetch`]; see
+    /// [Raw documents](self#raw-documents).
+    ///
+    /// # Errors
+    ///
+    /// - [`MetroError::Usage`] if `url` is not an absolute `http(s)` URL.
+    /// - [`MetroError::Network`] on transport failures, timeouts, too many
+    ///   redirects, oversized bodies, or any non-success status (a `304` to
+    ///   this unconditional request included).
+    pub fn get(&self, url: &str) -> Result<FetchedDocument, MetroError> {
+        match self.request(url, None, None)? {
+            RawResponse::Document(document) => Ok(document),
+            RawResponse::NotModified { .. } => Err(MetroError::Network(format!(
+                "failed to fetch {}: server returned HTTP 304 to an unconditional request",
+                url.trim()
+            ))),
+        }
+    }
+
+    /// Send one GET (with optional conditional headers), map its status, and
+    /// download the body of a `2xx` answer under the size cap.
+    ///
+    /// # Errors
+    ///
+    /// [`MetroError::Usage`] for an invalid URL, [`MetroError::Network`] for
+    /// transport failures, limits, and non-success statuses other than 304.
+    fn request(
+        &self,
+        url: &str,
+        etag: Option<&str>,
+        last_modified: Option<&str>,
+    ) -> Result<RawResponse, MetroError> {
         let target = parse_feed_url(url)?;
 
         let mut request = self.agent.get(target.as_str());
@@ -256,12 +396,9 @@ impl Fetcher {
         let response_last_modified = header_value(&response, "last-modified");
 
         if status == STATUS_NOT_MODIFIED {
-            return Ok(FetchResult {
-                status: FetchStatus::NotModified,
-                feed: None,
-                entries: Vec::new(),
-                etag: response_etag.or_else(|| etag.map(str::to_owned)),
-                last_modified: response_last_modified.or_else(|| last_modified.map(str::to_owned)),
+            return Ok(RawResponse::NotModified {
+                etag: response_etag,
+                last_modified: response_last_modified,
             });
         }
 
@@ -271,9 +408,10 @@ impl Fetcher {
             )));
         }
 
-        // Relative links in the feed resolve against the final URL, which
-        // differs from the requested one after a redirect.
-        let effective_url = response.get_uri().to_string();
+        // Relative links in the document resolve against the final URL,
+        // which differs from the requested one after a redirect.
+        let final_url = response.get_uri().to_string();
+        let content_type = header_value(&response, "content-type");
         let body = response
             .body_mut()
             .with_config()
@@ -281,15 +419,13 @@ impl Fetcher {
             .read_to_vec()
             .map_err(|error| network_error(target.as_str(), &error))?;
 
-        let (feed, entries) = parse_feed(&body, Some(&effective_url))?;
-
-        Ok(FetchResult {
-            status: FetchStatus::Modified,
-            feed: Some(feed),
-            entries,
+        Ok(RawResponse::Document(FetchedDocument {
+            final_url,
+            content_type,
             etag: response_etag,
             last_modified: response_last_modified,
-        })
+            body,
+        }))
     }
 }
 
@@ -645,6 +781,7 @@ mod tests {
         assert_eq!(config.read_timeout, Duration::from_secs(60));
         assert_eq!(config.max_redirects, 5);
         assert_eq!(config.max_body_bytes, 10 * 1024 * 1024);
+        assert_eq!(config.total_timeout, None);
         assert_eq!(USER_AGENT, "metro-feed/0.1 (terminal; local-first)");
     }
 
@@ -861,6 +998,104 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(&error, MetroError::Network(message) if message.contains("limit")));
+    }
+
+    #[test]
+    fn test_get_returns_raw_document_after_redirect() {
+        let (base, requests) = serve(2, |request| {
+            if request.starts_with("get /old") {
+                Reply::new("301 Moved Permanently", "").header("Location", "/new")
+            } else {
+                Reply::new("200 OK", "<html></html>")
+                    .header("Content-Type", "text/html; charset=utf-8")
+                    .header("ETag", "\"v1\"")
+                    .header("Last-Modified", "Thu, 01 Jan 2026 00:00:00 GMT")
+            }
+        });
+
+        let document = test_fetcher().get(&format!("{base}/old")).unwrap();
+
+        let request = requests.recv().unwrap();
+        assert!(!request.contains("if-none-match"));
+        assert!(!request.contains("if-modified-since"));
+        assert_eq!(document.final_url, format!("{base}/new"));
+        assert_eq!(
+            document.content_type.as_deref(),
+            Some("text/html; charset=utf-8")
+        );
+        assert_eq!(document.etag.as_deref(), Some("\"v1\""));
+        assert_eq!(
+            document.last_modified.as_deref(),
+            Some("Thu, 01 Jan 2026 00:00:00 GMT")
+        );
+        assert_eq!(document.body, b"<html></html>");
+    }
+
+    #[test]
+    fn test_get_maps_error_statuses_and_limits() {
+        let (base, _requests) = serve(1, |_| Reply::new("304 Not Modified", ""));
+        let error = test_fetcher().get(&base).unwrap_err();
+        assert!(matches!(&error, MetroError::Network(message) if message.contains("304")));
+
+        let (base, _requests) = serve(1, |_| Reply::new("404 Not Found", "gone"));
+        let error = test_fetcher().get(&base).unwrap_err();
+        assert!(matches!(&error, MetroError::Network(message) if message.contains("HTTP 404")));
+
+        let (base, _requests) = serve(1, |_| Reply::new("200 OK", RSS_FEED));
+        let error = Fetcher::new(FetchConfig {
+            max_body_bytes: 64,
+            ..FetchConfig::default()
+        })
+        .get(&base)
+        .unwrap_err();
+        assert!(matches!(&error, MetroError::Network(message) if message.contains("limit")));
+    }
+
+    #[test]
+    fn test_total_timeout_is_enforced() {
+        let (base, _requests) = serve(1, |_| Reply {
+            delay: Some(Duration::from_millis(1500)),
+            ..Reply::new("200 OK", RSS_FEED)
+        });
+        let fetcher = Fetcher::new(FetchConfig {
+            total_timeout: Some(Duration::from_millis(200)),
+            ..FetchConfig::default()
+        });
+
+        let error = fetcher.get(&base).unwrap_err();
+
+        assert!(matches!(&error, MetroError::Network(message) if message.contains("timed out")));
+    }
+
+    #[test]
+    fn test_into_feed_parses_or_gives_the_document_back() {
+        let document = FetchedDocument {
+            final_url: "https://blog.example.com/feed".to_string(),
+            content_type: Some("text/plain".to_string()),
+            etag: Some("\"v1\"".to_string()),
+            last_modified: None,
+            body: RSS_FEED.as_bytes().to_vec(),
+        };
+        let result = document.into_feed().unwrap();
+        assert_eq!(result.status, FetchStatus::Modified);
+        assert_eq!(result.etag.as_deref(), Some("\"v1\""));
+        assert_eq!(result.entries.len(), 2);
+        // Relative links resolve against the final URL.
+        assert_eq!(
+            result.entries[1].url.as_deref(),
+            Some("https://blog.example.com/posts/2")
+        );
+
+        let page = FetchedDocument {
+            final_url: "https://blog.example.com/".to_string(),
+            content_type: None,
+            etag: None,
+            last_modified: None,
+            body: b"<html></html>".to_vec(),
+        };
+        let failure = page.into_feed().unwrap_err();
+        assert!(matches!(failure.error, MetroError::Generic(_)));
+        assert_eq!(failure.document.body, b"<html></html>");
     }
 
     #[test]

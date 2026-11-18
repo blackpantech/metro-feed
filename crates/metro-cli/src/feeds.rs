@@ -31,10 +31,12 @@
 //! # `feeds add`
 //!
 //! Delegates to `metro_core::refresh::subscribe_url`, which validates the
-//! input, reports an already-subscribed URL without network access, runs
-//! autodiscovery (a feed URL passes through, a homepage yields its advertised
-//! feed) and then `subscribe_feed`, which fetches the feed and stores it with
-//! its real kind, title, site URL and initial entries in one transaction.
+//! input, reports an already-subscribed URL without network access, then
+//! requests the URL once and classifies the response by its body, whatever
+//! its `Content-Type`: a feed is stored from that very response (one
+//! request), a homepage's advertised feed is fetched next (two requests).
+//! Either way the feed is stored with its real kind, title, site URL,
+//! validators and initial entries in one transaction.
 //! Nothing is written when anything fails. `--dry-run` performs discovery and
 //! the fetch and shows the detected metadata, but writes nothing (not even
 //! the default `Unsorted` folder). A duplicate is not an error (exit 0): the
@@ -206,9 +208,13 @@ pub fn run(
 ) -> Result<(), MetroError> {
     match &args.command {
         // Only `add` touches the network, so only it builds an HTTP agent.
-        FeedsCommand::Add(add_args) => {
-            add(add_args, conn, output, &HttpDiscoverer, &Fetcher::default())
-        }
+        FeedsCommand::Add(add_args) => add(
+            add_args,
+            conn,
+            output,
+            &HttpDiscoverer::default(),
+            &Fetcher::default(),
+        ),
         FeedsCommand::List { folder } => list(conn, output, folder.as_deref()),
         FeedsCommand::Remove { ids } => remove(conn, output, ids),
         FeedsCommand::Move { ids, folder } => move_to(conn, output, ids, folder),
@@ -561,6 +567,7 @@ mod command_tests {
 
     use metro_core::db::migrations::run_migrations;
     use metro_core::db::open_in_memory;
+    use metro_core::discovery::Discovery;
     use metro_core::fetch::{FeedMetadata, FetchResult, FetchStatus, FetchedEntry};
     use metro_core::folders::create_folder;
     use metro_core::models::FeedKind;
@@ -577,25 +584,13 @@ mod command_tests {
         conn
     }
 
-    /// Discoverer resolving the homepage to [`FEED_URL`] and passing every
-    /// other URL through, recording calls.
-    #[derive(Default)]
-    struct MockDiscoverer {
-        calls: Mutex<Vec<String>>,
-    }
-
-    impl FeedDiscoverer for MockDiscoverer {
-        fn discover(&self, url: &str) -> Result<String, MetroError> {
-            self.calls.lock().unwrap().push(url.to_string());
-            Ok(if url == HOMEPAGE {
-                FEED_URL.to_string()
-            } else {
-                url.to_string()
-            })
-        }
-    }
-
-    /// Fetcher answering every request from a closure, recording URLs.
+    /// Mock network serving feeds from a closure, recording every request.
+    ///
+    /// It is both the discoverer and the fetcher, so [`MockFetcher::calls`]
+    /// counts all requests of a `feeds add`: [`HOMEPAGE`] is a page
+    /// advertising [`FEED_URL`]; any other URL is answered by the closure
+    /// (a feed result becomes [`Discovery::Feed`], an error is returned as
+    /// discovery would).
     struct MockFetcher<R> {
         respond: R,
         calls: Mutex<Vec<String>>,
@@ -611,6 +606,16 @@ mod command_tests {
 
         fn calls(&self) -> usize {
             self.calls.lock().unwrap().len()
+        }
+    }
+
+    impl<R: Fn(&str) -> Result<FetchResult, MetroError> + Sync> FeedDiscoverer for MockFetcher<R> {
+        fn discover(&self, url: &str) -> Result<Discovery, MetroError> {
+            self.calls.lock().unwrap().push(url.to_string());
+            if url == HOMEPAGE {
+                return Ok(Discovery::Link(FEED_URL.to_string()));
+            }
+            (self.respond)(url).map(Discovery::Feed)
         }
     }
 
@@ -672,7 +677,7 @@ mod command_tests {
             args,
             conn,
             &mut Output::new(&mut buf, format),
-            &MockDiscoverer::default(),
+            fetcher,
             fetcher,
         )?;
         Ok(String::from_utf8(buf).unwrap())
@@ -728,6 +733,7 @@ mod command_tests {
         let info = get_feed_info(&conn, FeedId(1)).unwrap();
         assert_eq!(info.kind, FeedKind::Atom);
         assert_eq!(info.entry_count, 2);
+        // A direct feed URL is requested exactly once.
         assert_eq!(fetcher.calls(), 1);
     }
 
@@ -742,14 +748,11 @@ mod command_tests {
             dry_run: false,
         };
 
-        let text = exec_add(
-            &mut conn,
-            OutputFormat::Json,
-            &args,
-            &MockFetcher::new(atom_result),
-        )
-        .unwrap();
+        let network = MockFetcher::new(atom_result);
+        let text = exec_add(&mut conn, OutputFormat::Json, &args, &network).unwrap();
 
+        // The homepage, then the feed it advertises.
+        assert_eq!(network.calls(), 2);
         let value: serde_json::Value = serde_json::from_str(text.trim_end()).unwrap();
         assert_eq!(value["status"], "subscribed");
         assert_eq!(value["url"], FEED_URL);
