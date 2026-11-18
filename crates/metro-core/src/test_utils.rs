@@ -16,6 +16,8 @@
 use std::env;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Name of the repository-level directory holding shared test fixtures.
 const FIXTURES_DIR_NAME: &str = "test-fixtures";
@@ -24,16 +26,30 @@ const FIXTURES_DIR_NAME: &str = "test-fixtures";
 ///
 /// The database file is created in the system temp directory
 /// with a unique name. Callers should delete the file after the test.
+#[must_use]
 pub fn temp_db_path() -> PathBuf {
     let id = uuid_simple();
-    env::temp_dir().join(format!("metro_test_{}.db", id))
+    env::temp_dir().join(format!("metro_test_{id}.db"))
 }
 
 /// Generate a simple unique ID for temp files.
+///
+/// Combines the wall-clock time with a process-wide counter, so IDs stay
+/// unique even when two calls land on the same timestamp or the system clock
+/// reports a time before the Unix epoch (treated as zero instead of
+/// panicking).
 fn uuid_simple() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let duration = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-    format!("{}_{}", duration.as_secs(), duration.subsec_nanos())
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let sequence = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!(
+        "{}_{}_{}_{sequence}",
+        duration.as_secs(),
+        duration.subsec_nanos(),
+        std::process::id()
+    )
 }
 
 /// Clean up a temporary database file.
@@ -79,6 +95,7 @@ pub fn load_fixture(name: &str) -> io::Result<Vec<u8>> {
 /// Load fixtures from a directory.
 ///
 /// Returns a map of fixture name to SQL content.
+#[must_use]
 pub fn fixture_loader(dir: &str) -> std::collections::HashMap<String, String> {
     let mut fixtures = std::collections::HashMap::new();
 
