@@ -4,6 +4,12 @@ use crate::MetroError;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Name of the per-application directory under the platform config and data
+/// roots (`$XDG_CONFIG_HOME/metro`, `$XDG_DATA_HOME/metro`, …).
+///
+/// It matches the binary name, not the project name (MVP spec decision 13).
+pub const APP_DIR_NAME: &str = "metro";
+
 /// Metro configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
@@ -22,7 +28,17 @@ impl Config {
     /// Config dir name: `metro` (matches the binary name, not project name).
     #[must_use]
     pub fn config_dir() -> Option<PathBuf> {
-        directories::BaseDirs::new().map(|d| d.config_dir().join("metro"))
+        directories::BaseDirs::new().map(|d| d.config_dir().join(APP_DIR_NAME))
+    }
+
+    /// Get the data directory path using the `directories` crate.
+    ///
+    /// Holds the SQLite database. Resolves to `$XDG_DATA_HOME/metro` (or
+    /// `~/.local/share/metro`) on Linux, `~/Library/Application Support/metro`
+    /// on macOS and `%APPDATA%/metro` on Windows.
+    #[must_use]
+    pub fn data_dir() -> Option<PathBuf> {
+        directories::BaseDirs::new().map(|d| d.data_dir().join(APP_DIR_NAME))
     }
 
     /// Get the path to the config file.
@@ -92,6 +108,12 @@ mod tests {
         assert!(dir.is_some());
         let dir_path = dir.unwrap();
         assert!(dir_path.ends_with("metro"));
+    }
+
+    #[test]
+    fn test_data_dir_name() {
+        let dir = Config::data_dir();
+        assert!(dir.is_some_and(|d| d.ends_with(APP_DIR_NAME)));
     }
 
     #[test]
