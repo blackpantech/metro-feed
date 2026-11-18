@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Shared Atom 1.0 fixture (metro-core tests/feed_fixtures.rs).
+  Covers: self vs alternate links, <published> taking precedence over
+  <updated>, an entry with only <updated> (date fallback) and a non-UTC
+  offset, a relative entry link, and HTML content.
+  Changing values here requires updating the assertions in that test.
+-->
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Metro Fixture Atom</title>
+  <link rel="self" href="https://atom.example.com/atom.xml"/>
+  <link rel="alternate" href="https://atom.example.com/"/>
+  <id>urn:uuid:7d1c6f3e-metro-fixture-atom</id>
+  <updated>2026-02-03T00:00:00+02:00</updated>
+  <entry>
+    <title>First Atom entry</title>
+    <link rel="alternate" href="https://atom.example.com/entries/1"/>
+    <id>urn:uuid:atom-entry-1</id>
+    <published>2026-02-01T10:00:00Z</published>
+    <updated>2026-02-05T10:00:00Z</updated>
+    <author><name>John Roe</name></author>
+    <summary>Summary of the first entry</summary>
+    <content type="html">&lt;p&gt;Full content of the first entry&lt;/p&gt;</content>
+  </entry>
+  <entry>
+    <title>Second Atom entry</title>
+    <link href="/entries/2"/>
+    <id>urn:uuid:atom-entry-2</id>
+    <updated>2026-02-03T00:00:00+02:00</updated>
+    <summary>Summary of the second entry</summary>
+  </entry>
+</feed>

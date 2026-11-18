@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Shared RSS 2.0 fixture (metro-core tests/feed_fixtures.rs).
+  Covers: <guid isPermaLink="false">, the "email (Name)" author convention,
+  content:encoded, a relative <link>, a non-UTC pubDate, an item without a
+  pubDate, and CDATA / entity-escaped titles.
+  Changing values here requires updating the assertions in that test.
+-->
+<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+  <channel>
+    <title>Metro Fixture RSS</title>
+    <link>https://rss.example.com/</link>
+    <description>RSS 2.0 fixture for parser tests</description>
+    <language>en</language>
+    <item>
+      <title>First RSS item</title>
+      <link>https://rss.example.com/posts/1</link>
+      <guid isPermaLink="false">rss-1</guid>
+      <author>jane@example.com (Jane Doe)</author>
+      <pubDate>Thu, 01 Jan 2026 08:30:00 GMT</pubDate>
+      <description>Summary of the first item</description>
+      <content:encoded><![CDATA[<p>Full content of the first item</p>]]></content:encoded>
+    </item>
+    <item>
+      <title><![CDATA[Second RSS item]]></title>
+      <link>/posts/2</link>
+      <guid>https://rss.example.com/posts/2</guid>
+      <pubDate>Fri, 02 Jan 2026 12:00:00 +0100</pubDate>
+      <description>Summary of the second item</description>
+    </item>
+    <item>
+      <title>Third &amp; undated</title>
+      <link>https://rss.example.com/posts/3</link>
+      <guid isPermaLink="false">rss-3</guid>
+      <description>An item without a publication date</description>
+    </item>
+  </channel>
+</rss>
