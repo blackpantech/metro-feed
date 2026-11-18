@@ -11,8 +11,9 @@ use super::id::{FeedId, FolderId};
 /// - Its URL and metadata (title, site URL, kind)
 /// - Which folder it belongs to
 /// - HTTP caching state (etag, `last_modified`)
-/// - Fetch history (`last_fetch` timestamp)
-/// - Error state (if the last fetch failed)
+/// - Fetch history (`last_fetch` timestamp of the last successful fetch)
+/// - Error state and its timestamp (`error_state`, `last_error_at`), set
+///   when the last fetch failed and cleared by the next successful one
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Feed {
     /// Unique identifier for this feed
@@ -35,6 +36,9 @@ pub struct Feed {
     pub last_fetch: Option<u64>,
     /// Error message if the last fetch failed (None if successful)
     pub error_state: Option<String>,
+    /// Unix timestamp of the last failed fetch, set together with
+    /// `error_state` (None if the last fetch succeeded or none failed yet)
+    pub last_error_at: Option<u64>,
 }
 
 impl Feed {
@@ -59,6 +63,7 @@ impl Feed {
             last_modified: None,
             last_fetch: None,
             error_state: None,
+            last_error_at: None,
         }
     }
 
@@ -122,6 +127,12 @@ impl Feed {
         self.error_state.as_deref()
     }
 
+    /// Get the Unix timestamp of the last failed fetch (None if no error)
+    #[must_use]
+    pub fn last_error_at(&self) -> Option<u64> {
+        self.last_error_at
+    }
+
     /// Returns true if the feed has an error state
     #[must_use]
     pub fn has_error(&self) -> bool {
@@ -154,9 +165,15 @@ impl Feed {
         self.error_state = error;
     }
 
-    /// Clear the error state (mark as successful)
+    /// Update the failure timestamp
+    pub fn set_last_error_at(&mut self, timestamp: Option<u64>) {
+        self.last_error_at = timestamp;
+    }
+
+    /// Clear the error state and its timestamp (mark as successful)
     pub fn clear_error(&mut self) {
         self.error_state = None;
+        self.last_error_at = None;
     }
 }
 
@@ -196,6 +213,7 @@ mod tests {
             last_modified: Some("Wed, 21 Oct 2015 07:28:00 GMT".to_string()),
             last_fetch: Some(1445414880),
             error_state: None,
+            last_error_at: None,
         };
 
         // Verify all required fields are present
@@ -240,14 +258,19 @@ mod tests {
         assert_eq!(feed.error_state(), None);
         assert!(!feed.has_error());
 
+        assert_eq!(feed.last_error_at(), None);
+
         // Feed with error
         feed.set_error_state(Some("Connection timeout".to_string()));
+        feed.set_last_error_at(Some(1_767_229_200));
         assert_eq!(feed.error_state(), Some("Connection timeout"));
+        assert_eq!(feed.last_error_at(), Some(1_767_229_200));
         assert!(feed.has_error());
 
-        // Clear error
+        // Clear error (and its timestamp)
         feed.clear_error();
         assert_eq!(feed.error_state(), None);
+        assert_eq!(feed.last_error_at(), None);
         assert!(!feed.has_error());
     }
 
@@ -279,7 +302,8 @@ mod tests {
             etag: Some("\"xyz789\"".to_string()),
             last_modified: Some("Thu, 01 Jan 2026 00:00:00 GMT".to_string()),
             last_fetch: Some(1767225600),
-            error_state: None,
+            error_state: Some("HTTP 500".to_string()),
+            last_error_at: Some(1767229200),
         };
 
         let json = serde_json::to_string_pretty(&feed).unwrap();
@@ -295,6 +319,7 @@ mod tests {
         assert_eq!(parsed.last_modified, feed.last_modified);
         assert_eq!(parsed.last_fetch, feed.last_fetch);
         assert_eq!(parsed.error_state, feed.error_state);
+        assert_eq!(parsed.last_error_at, feed.last_error_at);
     }
 
     #[test]
@@ -320,5 +345,6 @@ mod tests {
         assert!(json.contains("\"last_modified\""));
         assert!(json.contains("\"last_fetch\""));
         assert!(json.contains("\"error_state\""));
+        assert!(json.contains("\"last_error_at\""));
     }
 }

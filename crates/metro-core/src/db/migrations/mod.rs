@@ -306,8 +306,10 @@ mod tests {
     }
 
     /// `feeds` carries the backoff state of the `backoff` spec (design D6):
-    /// `consecutive_failures INTEGER DEFAULT 0` and a nullable
-    /// `next_retry INTEGER` (Unix seconds).
+    /// `consecutive_failures INTEGER DEFAULT 0`, a nullable
+    /// `next_retry INTEGER` (Unix seconds), and the nullable failure
+    /// timestamp `last_error_at INTEGER` (Unix seconds) of the
+    /// `feed-fetching` spec.
     #[test]
     fn test_migration_feeds_backoff_columns() {
         let mut conn = open_in_memory().unwrap();
@@ -340,10 +342,15 @@ mod tests {
         assert_eq!(next_retry.1, "INTEGER");
         assert!(!next_retry.2);
         assert_eq!(next_retry.3, None);
+
+        let last_error_at = column("last_error_at");
+        assert_eq!(last_error_at.1, "INTEGER");
+        assert!(!last_error_at.2);
+        assert_eq!(last_error_at.3, None);
     }
 
-    /// A feed inserted without backoff state starts healthy: zero failures
-    /// and no retry deadline.
+    /// A feed inserted without backoff state starts healthy: zero failures,
+    /// no retry deadline, and no failure timestamp.
     #[test]
     fn test_migration_feeds_backoff_defaults() {
         let mut conn = open_in_memory().unwrap();
@@ -361,14 +368,15 @@ mod tests {
         )
         .unwrap();
 
-        let (failures, next_retry): (Option<i64>, Option<i64>) = conn
+        let (failures, next_retry, last_error_at): (Option<i64>, Option<i64>, Option<i64>) = conn
             .query_row(
-                "SELECT consecutive_failures, next_retry FROM feeds WHERE id = 1",
+                "SELECT consecutive_failures, next_retry, last_error_at FROM feeds WHERE id = 1",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .unwrap();
         assert_eq!(failures, Some(0));
         assert_eq!(next_retry, None);
+        assert_eq!(last_error_at, None);
     }
 }

@@ -52,6 +52,7 @@ struct FeedState {
     last_modified: Option<String>,
     last_fetch: Option<i64>,
     error_state: Option<String>,
+    last_error_at: Option<i64>,
     consecutive_failures: Option<i64>,
     next_retry: Option<i64>,
 }
@@ -59,7 +60,7 @@ struct FeedState {
 fn feed_state(conn: &Connection, id: FeedId) -> FeedState {
     conn.query_row(
         "SELECT title, site_url, kind, etag, last_modified, last_fetch, error_state, \
-                consecutive_failures, next_retry FROM feeds WHERE id = ?1",
+                last_error_at, consecutive_failures, next_retry FROM feeds WHERE id = ?1",
         params![id.inner()],
         |row| {
             Ok(FeedState {
@@ -70,8 +71,9 @@ fn feed_state(conn: &Connection, id: FeedId) -> FeedState {
                 last_modified: row.get(4)?,
                 last_fetch: row.get(5)?,
                 error_state: row.get(6)?,
-                consecutive_failures: row.get(7)?,
-                next_retry: row.get(8)?,
+                last_error_at: row.get(7)?,
+                consecutive_failures: row.get(8)?,
+                next_retry: row.get(9)?,
             })
         },
     )
@@ -535,7 +537,9 @@ fn test_failure_records_error_and_keeps_last_fetch() {
     let fetcher =
         MockFetcher::new(|_, _, _| Err(MetroError::Network("connection refused".to_string())));
 
+    let before = now_unix();
     let report = refresh_all(&mut conn, &fetcher);
+    let after = now_unix();
 
     let state = feed_state(&conn, id);
     assert_eq!(
@@ -544,6 +548,13 @@ fn test_failure_records_error_and_keeps_last_fetch() {
         "failure must not touch last_fetch"
     );
     assert!(state.error_state.unwrap().contains("connection refused"));
+    let last_error_at = state.last_error_at.unwrap();
+    assert!(
+        (before..=after).contains(&last_error_at),
+        "last_error_at {last_error_at} should be the failure time ({before}..={after})"
+    );
+    // The backoff deadline is computed from the same failure time.
+    assert_eq!(state.next_retry, Some(last_error_at + 60));
     assert_eq!(state.consecutive_failures, Some(1));
     let failures: Vec<(FeedId, &MetroError)> = report.failures().collect();
     assert_eq!(failures.len(), 1);
@@ -570,6 +581,27 @@ fn test_repeated_failures_increment_and_success_resets() {
     assert_eq!(state.consecutive_failures, Some(0));
     assert_eq!(state.next_retry, None);
     assert_eq!(state.error_state, None);
+    assert_eq!(state.last_error_at, None, "a 200 clears last_error_at");
+    assert!(state.last_fetch.is_some());
+}
+
+#[test]
+fn test_not_modified_clears_error_state_and_last_error_at() {
+    let mut conn = test_conn();
+    let id = add_feeds(&mut conn, 1)[0];
+    let failing = MockFetcher::new(|_, _, _| Err(MetroError::Network("down".to_string())));
+    refresh_all(&mut conn, &failing);
+    let failed = feed_state(&conn, id);
+    assert!(failed.error_state.is_some());
+    assert!(failed.last_error_at.is_some());
+
+    set_column(&conn, id, "next_retry", Some(now_unix() - 1));
+    refresh_all(&mut conn, &MockFetcher::new(|_, _, _| Ok(not_modified())));
+
+    let state = feed_state(&conn, id);
+    assert_eq!(state.error_state, None);
+    assert_eq!(state.last_error_at, None, "a 304 clears last_error_at");
+    assert_eq!(state.consecutive_failures, Some(0));
     assert!(state.last_fetch.is_some());
 }
 

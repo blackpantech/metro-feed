@@ -177,6 +177,9 @@ pub struct FeedInfo {
     pub last_fetch: Option<u64>,
     /// Error message from the last fetch, if it failed.
     pub error_state: Option<String>,
+    /// Unix timestamp of the last fetch, if it failed (set with
+    /// `error_state`, cleared by the next successful fetch).
+    pub last_error_at: Option<u64>,
     /// Number of entries currently stored for the feed.
     pub entry_count: u64,
 }
@@ -448,10 +451,11 @@ struct StoredFeed {
     last_modified: Option<String>,
     last_fetch: Option<i64>,
     error_state: Option<String>,
+    last_error_at: Option<i64>,
 }
 
 impl StoredFeed {
-    /// Read the ten feed columns from a query row, in selector order.
+    /// Read the eleven feed columns from a query row, in selector order.
     fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
         Ok(Self {
             id: row.get(0)?,
@@ -464,6 +468,7 @@ impl StoredFeed {
             last_modified: row.get(7)?,
             last_fetch: row.get(8)?,
             error_state: row.get(9)?,
+            last_error_at: row.get(10)?,
         })
     }
 
@@ -480,6 +485,7 @@ impl StoredFeed {
             last_modified: self.last_modified,
             last_fetch: timestamp_from_row(self.last_fetch)?,
             error_state: self.error_state,
+            last_error_at: timestamp_from_row(self.last_error_at)?,
         })
     }
 }
@@ -607,7 +613,7 @@ pub(crate) struct NewFeed<'a> {
 /// Validates the target folder with [`ensure_feed_folder`] first. The caller
 /// is responsible for the duplicate check (in the same transaction) and for
 /// committing. Fetch state (`etag`, `last_modified`, `last_fetch`,
-/// `error_state`, backoff columns) starts out empty.
+/// `error_state`, `last_error_at`, backoff columns) starts out empty.
 ///
 /// # Errors
 ///
@@ -699,7 +705,8 @@ pub fn add_feed(
 
 /// SQL selector shared by [`list_feeds`] queries.
 const FEED_COLUMNS: &str = "f.id, f.url, f.title, f.site_url, f.kind, f.folder_id, \
-                            f.etag, f.last_modified, f.last_fetch, f.error_state";
+                            f.etag, f.last_modified, f.last_fetch, f.error_state, \
+                            f.last_error_at";
 
 /// SQL sort order shared by [`list_feeds`] queries.
 ///
@@ -739,7 +746,7 @@ pub fn list_feeds(conn: &Connection, folder_id: Option<FolderId>) -> Result<Vec<
 
 /// Run a feed selector and convert every row into a [`Feed`].
 ///
-/// `sql` must select exactly the ten [`FEED_COLUMNS`]. Keeping the execution
+/// `sql` must select exactly the eleven [`FEED_COLUMNS`]. Keeping the execution
 /// and row conversion in one helper keeps the filtered and unfiltered
 /// [`list_feeds`] queries in sync.
 fn query_feeds(
@@ -932,7 +939,7 @@ pub fn get_feed_info(conn: &Connection, id: FeedId) -> Result<FeedInfo, MetroErr
     let row = conn
         .query_row(
             "SELECT f.id, f.url, f.title, f.site_url, f.kind, f.folder_id, fo.name, \
-                    f.last_fetch, f.error_state, \
+                    f.last_fetch, f.error_state, f.last_error_at, \
                     (SELECT COUNT(*) FROM entries AS e WHERE e.feed_id = f.id) \
              FROM feeds AS f JOIN folders AS fo ON fo.id = f.folder_id \
              WHERE f.id = ?1",
@@ -948,7 +955,8 @@ pub fn get_feed_info(conn: &Connection, id: FeedId) -> Result<FeedInfo, MetroErr
                     row.get::<_, String>(6)?,
                     row.get::<_, Option<i64>>(7)?,
                     row.get::<_, Option<String>>(8)?,
-                    row.get::<_, i64>(9)?,
+                    row.get::<_, Option<i64>>(9)?,
+                    row.get::<_, i64>(10)?,
                 ))
             },
         )
@@ -964,6 +972,7 @@ pub fn get_feed_info(conn: &Connection, id: FeedId) -> Result<FeedInfo, MetroErr
         folder_name,
         last_fetch,
         error_state,
+        last_error_at,
         entry_count,
     )) = row
     else {
@@ -980,6 +989,7 @@ pub fn get_feed_info(conn: &Connection, id: FeedId) -> Result<FeedInfo, MetroErr
         folder_name,
         last_fetch: timestamp_from_row(last_fetch)?,
         error_state,
+        last_error_at: timestamp_from_row(last_error_at)?,
         entry_count: u64::try_from(entry_count).map_err(|_| {
             MetroError::Generic(format!(
                 "negative entry count {entry_count} stored in database"
@@ -1385,13 +1395,15 @@ mod tests {
         let mut conn = test_conn();
         let outcome = add_feed(&mut conn, "https://example.com/feed.xml", None, None).unwrap();
         conn.execute(
-            "UPDATE feeds SET etag = ?1, last_modified = ?2, last_fetch = ?3, error_state = ?4 \
-             WHERE id = ?5",
+            "UPDATE feeds SET etag = ?1, last_modified = ?2, last_fetch = ?3, error_state = ?4, \
+                 last_error_at = ?5 \
+             WHERE id = ?6",
             params![
                 "\"abc\"",
                 "Wed, 21 Oct 2015 07:28:00 GMT",
                 1_445_414_880_i64,
                 "timeout",
+                1_445_418_480_i64,
                 outcome.id.inner()
             ],
         )
@@ -1403,6 +1415,7 @@ mod tests {
         assert_eq!(feed.last_modified(), Some("Wed, 21 Oct 2015 07:28:00 GMT"));
         assert_eq!(feed.last_fetch(), Some(1_445_414_880));
         assert_eq!(feed.error_state(), Some("timeout"));
+        assert_eq!(feed.last_error_at(), Some(1_445_418_480));
     }
 
     #[test]
@@ -1570,8 +1583,13 @@ mod tests {
         insert_entry_row(&conn, outcome.id, "guid-1");
         insert_entry_row(&conn, outcome.id, "guid-2");
         conn.execute(
-            "UPDATE feeds SET last_fetch = ?1, error_state = ?2 WHERE id = ?3",
-            params![1_445_414_880_i64, "timeout", outcome.id.inner()],
+            "UPDATE feeds SET last_fetch = ?1, error_state = ?2, last_error_at = ?3 WHERE id = ?4",
+            params![
+                1_445_414_880_i64,
+                "timeout",
+                1_445_418_480_i64,
+                outcome.id.inner()
+            ],
         )
         .unwrap();
 
@@ -1585,6 +1603,7 @@ mod tests {
         assert_eq!(info.folder_name, "Tech");
         assert_eq!(info.last_fetch, Some(1_445_414_880));
         assert_eq!(info.error_state.as_deref(), Some("timeout"));
+        assert_eq!(info.last_error_at, Some(1_445_418_480));
         assert_eq!(info.entry_count, 2);
     }
 
@@ -1597,6 +1616,7 @@ mod tests {
         assert_eq!(info.folder_name, "Unsorted");
         assert_eq!(info.last_fetch, None);
         assert_eq!(info.error_state, None);
+        assert_eq!(info.last_error_at, None);
         assert_eq!(info.entry_count, 0);
     }
 
