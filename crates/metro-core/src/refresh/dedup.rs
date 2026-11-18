@@ -1,9 +1,11 @@
 //! Entry identity keys for refresh deduplication.
 //!
 //! The refresh spec deduplicates entries in priority order **guid → url →
-//! content hash**. This module turns a [`FetchedEntry`] into the single key
-//! stored in the `entries.guid` column, whose `UNIQUE` constraint (design
-//! decision D2) then lets `INSERT OR IGNORE` skip duplicates atomically:
+//! content hash**, and every tier is scoped **per feed**: two feeds that
+//! publish the same guid or URL each keep their own entry. This module turns
+//! a [`FetchedEntry`] into the single key stored in the `entries.guid`
+//! column, whose `UNIQUE(feed_id, guid)` constraint (design decision D2) then
+//! lets `INSERT OR IGNORE` skip duplicates within a feed atomically:
 //!
 //! 1. the entry's own guid, trimmed, when it is not blank;
 //! 2. otherwise the entry's URL, trimmed, when it is not blank;
@@ -15,8 +17,8 @@
 //! feeds (or future parsers) that yield blank ids.
 //!
 //! The URL tier is **also** enforced independently of the key by the writer
-//! (an entry whose URL is already stored is skipped even when its guid is
-//! new); see `refresh::writer`.
+//! (an entry whose URL is already stored for the same feed is skipped even
+//! when its guid is new); see `refresh::writer`.
 //!
 //! # Hash stability
 //!
@@ -24,7 +26,8 @@
 //! platforms, and Rust releases. `std::hash::DefaultHasher` makes no such
 //! promise, so a hand-rolled 64-bit FNV-1a is used instead. It is not
 //! cryptographic; collisions only cause a genuinely new, guid-less, URL-less
-//! entry to be skipped, which is an acceptable failure mode for this tier.
+//! entry of the same feed to be skipped, which is an acceptable failure mode
+//! for this tier.
 
 use std::borrow::Cow;
 

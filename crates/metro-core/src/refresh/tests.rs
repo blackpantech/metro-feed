@@ -285,6 +285,84 @@ fn test_duplicate_url_with_different_guid_is_skipped() {
     assert_eq!(entry_count(&conn, id), 1);
 }
 
+/// Dedup is scoped per feed (D2): the same guid published by two feeds is
+/// two entries, one per feed.
+#[test]
+fn test_same_guid_in_two_feeds_stores_two_entries() {
+    let mut conn = test_conn();
+    let ids = add_feeds(&mut conn, 2);
+    let fetcher = MockFetcher::new(|url, _, _| {
+        Ok(modified(
+            FeedKind::Rss,
+            None,
+            None,
+            vec![entry("shared-guid", Some(&format!("{url}/post")))],
+        ))
+    });
+
+    let report = refresh_all(&mut conn, &fetcher);
+
+    assert_eq!(report.new_entries(), 2);
+    assert_eq!(entry_count(&conn, ids[0]), 1);
+    assert_eq!(entry_count(&conn, ids[1]), 1);
+}
+
+/// The URL guard is scoped per feed too: the same article URL in two feeds
+/// (with distinct guids) is two entries.
+#[test]
+fn test_same_url_in_two_feeds_stores_two_entries() {
+    let mut conn = test_conn();
+    let ids = add_feeds(&mut conn, 2);
+    let fetcher = MockFetcher::new(|url, _, _| {
+        Ok(modified(
+            FeedKind::Rss,
+            None,
+            None,
+            vec![entry(
+                &format!("{url}#post"),
+                Some("https://example.com/post"),
+            )],
+        ))
+    });
+
+    let report = refresh_all(&mut conn, &fetcher);
+
+    assert_eq!(report.new_entries(), 2);
+    assert_eq!(entry_count(&conn, ids[0]), 1);
+    assert_eq!(entry_count(&conn, ids[1]), 1);
+}
+
+/// Sharing a guid and a URL with another feed does not weaken dedup inside
+/// each feed: a repeated guid or URL within one feed is still skipped, on
+/// the same fetch and on the next refresh.
+#[test]
+fn test_duplicate_within_one_feed_is_still_skipped_when_shared_across_feeds() {
+    let mut conn = test_conn();
+    let ids = add_feeds(&mut conn, 2);
+    let fetcher = MockFetcher::new(|_, _, _| {
+        Ok(modified(
+            FeedKind::Rss,
+            None,
+            None,
+            vec![
+                entry("shared-guid", Some("https://example.com/post")),
+                // Same guid, new URL: skipped by UNIQUE(feed_id, guid).
+                entry("shared-guid", Some("https://example.com/other")),
+                // New guid, same URL: skipped by the per-feed URL guard.
+                entry("another-guid", Some("https://example.com/post")),
+            ],
+        ))
+    });
+
+    let first = refresh_all(&mut conn, &fetcher);
+    let second = refresh_all(&mut conn, &fetcher);
+
+    assert_eq!(first.new_entries(), 2);
+    assert_eq!(second.new_entries(), 0);
+    assert_eq!(entry_count(&conn, ids[0]), 1);
+    assert_eq!(entry_count(&conn, ids[1]), 1);
+}
+
 #[test]
 fn test_entries_without_url_are_not_deduplicated_by_url() {
     let mut conn = test_conn();
