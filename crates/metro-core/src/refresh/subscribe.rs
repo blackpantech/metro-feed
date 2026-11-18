@@ -32,10 +32,35 @@
 //! 7. Otherwise resolve the folder (default `Unsorted`), then in one
 //!    `IMMEDIATE` transaction re-check for a concurrent duplicate, insert the
 //!    feed row, and apply the fetch result exactly as a refresh would.
+//!
+//! # Subscribing from user input
+//!
+//! [`subscribe_url`] is the entry point for frontends (`metro feeds add`,
+//! later the TUI): it accepts what the user typed, which may be a feed URL
+//! or a blog homepage, and wraps [`subscribe_feed`] with autodiscovery:
+//!
+//! 1. Validate the URL and the explicit title, return
+//!    [`SubscribeOutcome::Duplicate`] when the input URL itself is already
+//!    subscribed, then validate the folder: all **before** any network
+//!    access.
+//! 2. Resolve the input with a [`FeedDiscoverer`]: a direct feed URL comes
+//!    back unchanged, a homepage yields its advertised feed URL. Discovery
+//!    errors are returned as is (`Network` → exit 4, `NotFound` when the
+//!    page advertises no feed → exit 3).
+//! 3. Call [`subscribe_feed`] with the resolved URL (which re-checks
+//!    duplicates, since a homepage may advertise an already-subscribed feed).
+//!
+//! A direct feed URL is therefore requested twice (once by discovery, which
+//! only inspects the `Content-Type`, once by the fetch). That keeps the two
+//! capabilities independent, as the design describes (`feeds add` "runs
+//! autodiscovery then `subscribe_feed`"), at the cost of one extra request
+//! per subscription.
 
 use rusqlite::{Connection, TransactionBehavior};
+use serde::Serialize;
 
 use crate::MetroError;
+use crate::discovery::FeedDiscoverer;
 use crate::feeds::{
     NewFeed, ensure_feed_folder, find_feed_by_url, insert_feed, normalize_url, url_placeholders,
     validate_explicit_title,
@@ -47,7 +72,10 @@ use crate::refresh::FeedFetcher;
 use crate::refresh::writer::{apply_fetch_success, now_unix};
 
 /// Metadata [`subscribe_feed`] stores (or, in dry-run mode, would store).
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Serializable so frontends can emit it as is (`metro feeds add --dry-run
+/// --json`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FeedPreview {
     /// Normalized feed URL.
     pub url: String,
@@ -161,6 +189,50 @@ pub fn subscribe_feed<F: FeedFetcher>(
         feed,
         new_entries,
     })
+}
+
+/// Subscribe to a feed given as a feed URL or a homepage URL.
+///
+/// Validates the input, short-circuits an already-subscribed input URL,
+/// resolves the feed URL with `discoverer`, then delegates to
+/// [`subscribe_feed`]; see the [module documentation](self) for the flow.
+/// `folder_id`, `title`, and `dry_run` have the same meaning as for
+/// [`subscribe_feed`]. A dry run performs discovery and the fetch but writes
+/// nothing.
+///
+/// # Errors
+///
+/// - [`MetroError::Usage`] for an invalid URL, a blank explicit title, or a
+///   folder that is not a feed folder (all before any network access).
+/// - [`MetroError::NotFound`] when the given folder does not exist (before
+///   any network access), or when the page advertises no feed.
+/// - [`MetroError::Network`] when discovery or the feed download fails.
+/// - [`MetroError::Generic`] when the body is not a feed, or a database
+///   operation fails.
+///
+/// On any error, nothing is written.
+pub fn subscribe_url<D: FeedDiscoverer, F: FeedFetcher>(
+    conn: &mut Connection,
+    discoverer: &D,
+    fetcher: &F,
+    url: &str,
+    title: Option<&str>,
+    folder_id: Option<FolderId>,
+    dry_run: bool,
+) -> Result<SubscribeOutcome, MetroError> {
+    let normalized = normalize_url(url)?;
+    validate_explicit_title(title)?;
+    // Same order of checks as `subscribe_feed`: a duplicate wins over folder
+    // validation.
+    if let Some(id) = find_feed_by_url(conn, &normalized)? {
+        return Ok(SubscribeOutcome::Duplicate { id });
+    }
+    if let Some(folder_id) = folder_id {
+        ensure_feed_folder(conn, folder_id)?;
+    }
+
+    let feed_url = discoverer.discover(url)?;
+    subscribe_feed(conn, fetcher, &feed_url, title, folder_id, dry_run)
 }
 
 /// Compute the metadata to store from the fetch result.
@@ -473,5 +545,190 @@ mod tests {
         let bad_url = subscribe_feed(&mut conn, &fetcher, "ftp://x", None, None, false);
         assert!(matches!(bad_url, Err(MetroError::Usage(_))));
         assert!(fetcher.calls().is_empty());
+    }
+
+    /// A discoverer answering from a closure and recording its inputs.
+    struct MockDiscoverer<R> {
+        respond: R,
+        calls: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl<R: Fn(&str) -> Result<String, MetroError>> MockDiscoverer<R> {
+        fn new(respond: R) -> Self {
+            Self {
+                respond,
+                calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl<R: Fn(&str) -> Result<String, MetroError>> FeedDiscoverer for MockDiscoverer<R> {
+        fn discover(&self, homepage_url: &str) -> Result<String, MetroError> {
+            self.calls.lock().unwrap().push(homepage_url.to_string());
+            (self.respond)(homepage_url)
+        }
+    }
+
+    #[test]
+    fn test_subscribe_url_discovers_then_subscribes() {
+        let mut conn = test_conn();
+        let discoverer = MockDiscoverer::new(|_| Ok(ATOM_URL.to_string()));
+        let fetcher = MockFetcher::new(|_, _, _| Ok(atom_result()));
+
+        let outcome = subscribe_url(
+            &mut conn,
+            &discoverer,
+            &fetcher,
+            "https://atom.example.com/",
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+
+        let SubscribeOutcome::Subscribed { feed, .. } = outcome else {
+            panic!("expected Subscribed, got {outcome:?}");
+        };
+        assert_eq!(feed.url, ATOM_URL);
+        assert_eq!(discoverer.calls(), vec!["https://atom.example.com/"]);
+        assert_eq!(fetcher.calls()[0].url, ATOM_URL);
+        assert_eq!(row_count(&conn, "feeds"), 1);
+    }
+
+    #[test]
+    fn test_subscribe_url_duplicate_input_skips_network() {
+        let mut conn = test_conn();
+        let discoverer = MockDiscoverer::new(|url| Ok(url.to_string()));
+        let fetcher = MockFetcher::new(|_, _, _| Ok(atom_result()));
+        let first = subscribe_url(
+            &mut conn,
+            &discoverer,
+            &fetcher,
+            ATOM_URL,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        let SubscribeOutcome::Subscribed { id, .. } = first else {
+            panic!("expected Subscribed, got {first:?}");
+        };
+
+        let second = subscribe_url(
+            &mut conn,
+            &discoverer,
+            &fetcher,
+            ATOM_URL,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(second, SubscribeOutcome::Duplicate { id });
+        assert_eq!(discoverer.calls().len(), 1);
+        assert_eq!(fetcher.calls().len(), 1);
+    }
+
+    #[test]
+    fn test_subscribe_url_discovered_duplicate_is_reported() {
+        let mut conn = test_conn();
+        let fetcher = MockFetcher::new(|_, _, _| Ok(atom_result()));
+        let first = subscribe_feed(&mut conn, &fetcher, ATOM_URL, None, None, false).unwrap();
+        let SubscribeOutcome::Subscribed { id, .. } = first else {
+            panic!("expected Subscribed, got {first:?}");
+        };
+        let discoverer = MockDiscoverer::new(|_| Ok(ATOM_URL.to_string()));
+
+        let outcome = subscribe_url(
+            &mut conn,
+            &discoverer,
+            &fetcher,
+            "https://atom.example.com",
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(outcome, SubscribeOutcome::Duplicate { id });
+        assert_eq!(fetcher.calls().len(), 1, "duplicate must not be fetched");
+    }
+
+    #[test]
+    fn test_subscribe_url_validates_before_network() {
+        let mut conn = test_conn();
+        let discoverer = MockDiscoverer::new(|url| Ok(url.to_string()));
+        let fetcher = MockFetcher::new(|_, _, _| Ok(atom_result()));
+
+        let bad_url = subscribe_url(&mut conn, &discoverer, &fetcher, "nope", None, None, false);
+        assert!(matches!(bad_url, Err(MetroError::Usage(_))));
+        let blank = subscribe_url(
+            &mut conn,
+            &discoverer,
+            &fetcher,
+            ATOM_URL,
+            Some(" "),
+            None,
+            false,
+        );
+        assert!(matches!(blank, Err(MetroError::Usage(_))));
+        let folder = subscribe_url(
+            &mut conn,
+            &discoverer,
+            &fetcher,
+            ATOM_URL,
+            None,
+            Some(FolderId::new(999)),
+            false,
+        );
+        assert!(matches!(folder, Err(MetroError::NotFound(_))));
+
+        assert!(discoverer.calls().is_empty());
+        assert!(fetcher.calls().is_empty());
+    }
+
+    #[test]
+    fn test_subscribe_url_discovery_errors_write_nothing() {
+        let mut conn = test_conn();
+        let fetcher = MockFetcher::new(|_, _, _| Ok(atom_result()));
+        let offline = MockDiscoverer::new(|_| Err(MetroError::Network("timed out".to_string())));
+        let no_feed = MockDiscoverer::new(|_| Err(MetroError::NotFound("no feed".to_string())));
+        let homepage = "https://blog.example.com";
+
+        let network = subscribe_url(&mut conn, &offline, &fetcher, homepage, None, None, false);
+        assert_eq!(network.unwrap_err().exit_code(), 4);
+        let missing = subscribe_url(&mut conn, &no_feed, &fetcher, homepage, None, None, false);
+        assert_eq!(missing.unwrap_err().exit_code(), 3);
+
+        assert!(fetcher.calls().is_empty());
+        assert_eq!(row_count(&conn, "feeds"), 0);
+        assert_eq!(row_count(&conn, "folders"), 0);
+    }
+
+    #[test]
+    fn test_subscribe_url_dry_run_writes_nothing() {
+        let mut conn = test_conn();
+        let discoverer = MockDiscoverer::new(|_| Ok(ATOM_URL.to_string()));
+        let fetcher = MockFetcher::new(|_, _, _| Ok(atom_result()));
+
+        let outcome = subscribe_url(
+            &mut conn,
+            &discoverer,
+            &fetcher,
+            "https://atom.example.com",
+            None,
+            None,
+            true,
+        )
+        .unwrap();
+
+        assert!(matches!(outcome, SubscribeOutcome::DryRun { .. }));
+        assert_eq!(row_count(&conn, "feeds"), 0);
+        assert_eq!(row_count(&conn, "folders"), 0);
     }
 }
