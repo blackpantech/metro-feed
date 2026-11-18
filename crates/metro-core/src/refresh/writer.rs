@@ -23,7 +23,11 @@
 //! # What a failed fetch records
 //!
 //! `error_state` receives the error message, `consecutive_failures` is
-//! incremented, and `next_retry` is set from [`next_retry_after_failure`].
+//! incremented, and `next_retry` is set to the failure time plus the
+//! exponential backoff delay for the new counter value, computed by
+//! [`next_retry_at`] (1m, 5m, 30m, 2h, 12h, then 24h for every further
+//! failure; `backoff` spec, D6). Until that deadline passes, the refresh
+//! pipeline skips the feed (see `refresh::partition_by_backoff`).
 //! `last_fetch` is never touched by a failure (D6), so `last_fetch IS NULL`
 //! keeps meaning "never fetched successfully".
 //!
@@ -43,6 +47,7 @@
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
 use crate::MetroError;
+use crate::feeds::next_retry_at;
 use crate::fetch::{FetchResult, FetchStatus};
 use crate::models::FeedId;
 use crate::refresh::dedup::{dedup_key, entry_url};
@@ -59,21 +64,6 @@ const INSERT_ENTRY_SQL: &str = "INSERT OR IGNORE INTO entries \
 /// Current time as Unix seconds, the unit of every timestamp column.
 pub(crate) fn now_unix() -> i64 {
     jiff::Timestamp::now().as_second()
-}
-
-/// Compute `next_retry` after a failure (the backoff seam).
-///
-/// Called with the **incremented** `consecutive_failures` value and the
-/// failure time. Returning `None` stores `next_retry = NULL`, meaning the
-/// feed is retried on the next refresh.
-///
-/// This is the single integration point for the exponential backoff
-/// schedule (1m, 5m, 30m, 2h, 12h, 24h max) of the `backoff` spec, which is
-/// implemented by task section 9 of `m1-feeds-core`. Until then no delay is
-/// applied, while the failure counter and the skip check (see
-/// `refresh::load_candidates`) are already fully wired.
-fn next_retry_after_failure(_consecutive_failures: u32, _failed_at: i64) -> Option<i64> {
-    None
 }
 
 /// Persist a successful refresh fetch in its own `IMMEDIATE` transaction.
@@ -225,7 +215,8 @@ fn insert_entries(
 /// Record a failed fetch in its own `IMMEDIATE` transaction.
 ///
 /// Sets `error_state` to `message`, increments `consecutive_failures`, and
-/// sets `next_retry` from [`next_retry_after_failure`]. `last_fetch` is left
+/// sets `next_retry` to the backoff deadline from [`next_retry_at`] for the
+/// incremented counter, relative to the failure time. `last_fetch` is left
 /// untouched (D6). A feed that was removed meanwhile is silently ignored:
 /// there is no row left to annotate.
 ///
@@ -258,7 +249,7 @@ pub(crate) fn store_refresh_failure(
         .and_then(|count| u32::try_from(count).ok())
         .unwrap_or_default()
         .saturating_add(1);
-    let next_retry = next_retry_after_failure(failures, now);
+    let next_retry = next_retry_at(failures, now);
 
     tx.execute(
         "UPDATE feeds SET error_state = ?1, consecutive_failures = ?2, next_retry = ?3 \

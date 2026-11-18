@@ -87,9 +87,16 @@ fn set_column(conn: &Connection, id: FeedId, column: &str, value: Option<i64>) {
 
 /// A fetcher answering every feed with an RSS document containing one entry
 /// whose guid is unique per feed URL.
-fn per_feed_entry_fetcher()
--> MockFetcher<impl Fn(&str, Option<&str>, Option<&str>) -> Result<FetchResult, MetroError> + Sync>
+/// Shorthand for the closure type a [`MockFetcher`] wraps (keeps
+/// `clippy::type_complexity` quiet on helper return types).
+trait FetchFn: Fn(&str, Option<&str>, Option<&str>) -> Result<FetchResult, MetroError> + Sync {}
+
+impl<T> FetchFn for T where
+    T: Fn(&str, Option<&str>, Option<&str>) -> Result<FetchResult, MetroError> + Sync
 {
+}
+
+fn per_feed_entry_fetcher() -> MockFetcher<impl FetchFn> {
     MockFetcher::new(|url, _, _| {
         Ok(modified(
             FeedKind::Rss,
@@ -468,6 +475,8 @@ fn test_repeated_failures_increment_and_success_resets() {
     let failing = MockFetcher::new(|_, _, _| Err(MetroError::Network("down".to_string())));
 
     refresh_all(&mut conn, &failing);
+    // Leave backoff so the second refresh fetches (and fails) again.
+    set_column(&conn, id, "next_retry", Some(now_unix() - 1));
     refresh_all(&mut conn, &failing);
     assert_eq!(feed_state(&conn, id).consecutive_failures, Some(2));
 
@@ -701,6 +710,8 @@ fn test_failed_first_fetch_keeps_title_eligible() {
         &MockFetcher::new(|_, _, _| Err(MetroError::Network("down".to_string()))),
     );
     assert_eq!(feed_state(&conn, id).last_fetch, None);
+    // Leave the backoff started by the failure so the next refresh fetches.
+    set_column(&conn, id, "next_retry", None);
 
     refresh_all(
         &mut conn,
@@ -829,6 +840,72 @@ fn test_feed_past_backoff_is_fetched() {
     assert_eq!(fetcher.calls().len(), 1);
     assert!(report.skipped.is_empty());
     assert_eq!(feed_state(&conn, id).next_retry, None);
+}
+
+#[test]
+fn test_first_failure_sets_one_minute_backoff() {
+    let mut conn = test_conn();
+    let id = add_feeds(&mut conn, 1)[0];
+    let failing = MockFetcher::new(|_, _, _| Err(MetroError::Network("down".to_string())));
+
+    let before = now_unix();
+    refresh_all(&mut conn, &failing);
+    let after = now_unix();
+
+    let state = feed_state(&conn, id);
+    assert_eq!(state.consecutive_failures, Some(1));
+    let next_retry = state.next_retry.unwrap();
+    assert!(
+        (before + 60..=after + 60).contains(&next_retry),
+        "next_retry {next_retry} should be one minute after the failure ({before}..={after})"
+    );
+}
+
+#[test]
+fn test_failure_backoff_follows_schedule_and_caps() {
+    let mut conn = test_conn();
+    let id = add_feeds(&mut conn, 1)[0];
+    let failing = MockFetcher::new(|_, _, _| Err(MetroError::Network("down".to_string())));
+    let expected_delays = [60, 300, 1_800, 7_200, 43_200, 86_400, 86_400, 86_400];
+
+    for (index, delay) in expected_delays.into_iter().enumerate() {
+        // Leave the previous backoff so the feed is fetched (and fails) again.
+        set_column(&conn, id, "next_retry", None);
+        let before = now_unix();
+        let report = refresh_all(&mut conn, &failing);
+        let after = now_unix();
+
+        assert!(report.skipped.is_empty());
+        let state = feed_state(&conn, id);
+        assert_eq!(
+            state.consecutive_failures,
+            Some(i64::try_from(index).unwrap() + 1)
+        );
+        let next_retry = state.next_retry.unwrap();
+        assert!(
+            (before + delay..=after + delay).contains(&next_retry),
+            "failure #{}: next_retry {next_retry} not {delay}s after {before}..={after}",
+            index + 1
+        );
+    }
+}
+
+#[test]
+fn test_failed_feed_is_skipped_by_next_refresh() {
+    let mut conn = test_conn();
+    let id = add_feeds(&mut conn, 1)[0];
+    let failing = MockFetcher::new(|_, _, _| Err(MetroError::Network("down".to_string())));
+
+    refresh_all(&mut conn, &failing);
+    let report = refresh_all(&mut conn, &failing);
+
+    assert!(
+        report.results.is_empty(),
+        "feed in backoff must not be fetched"
+    );
+    assert_eq!(report.skipped.len(), 1);
+    assert_eq!(report.skipped[0].feed_id, id);
+    assert_eq!(feed_state(&conn, id).consecutive_failures, Some(1));
 }
 
 #[test]

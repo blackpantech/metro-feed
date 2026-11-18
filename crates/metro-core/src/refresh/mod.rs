@@ -38,10 +38,12 @@
 //!   and in the [`RefreshReport`]; the remaining feeds are still fetched. A
 //!   **database** error, by contrast, is systemic: the writer stops the
 //!   workers and [`refresh_feeds`] returns the error.
-//! - **Backoff skip** (task 8.4): feeds whose `next_retry` lies in the future
-//!   are not fetched and are listed in [`RefreshReport::skipped`]. The
-//!   schedule that sets `next_retry` lives behind a single seam in
-//!   `writer::next_retry_after_failure` (filled by the backoff task).
+//! - **Backoff** (D6): a failure sets `next_retry` to the failure time plus
+//!   the exponential delay for the feed's new `consecutive_failures` value
+//!   ([`crate::feeds::next_retry_at`]: 1m, 5m, 30m, 2h, 12h, 24h max). Feeds
+//!   whose `next_retry` lies in the future are not fetched (not even when
+//!   targeted explicitly) and are listed in [`RefreshReport::skipped`]; a
+//!   success resets the counter and clears the deadline.
 //! - **Entry dedup**: guid → url → content hash, see `dedup` and `writer`.
 //! - **Progress**: when [`RefreshOptions::progress`] is set, a
 //!   [`RefreshEvent::Started`] event is sent once, then one
