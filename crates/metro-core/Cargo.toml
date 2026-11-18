@@ -19,5 +19,17 @@ url = { workspace = true }
 [features]
 test-utils = []
 
+# Integration tests use the `test-utils` helpers (temp databases, shared
+# fixtures). `required-features` makes Cargo skip these targets entirely when
+# the feature is off, so `cargo test --workspace` (no features) still builds
+# and passes; `cargo test --workspace --features test-utils` runs them.
+[[test]]
+name = "refresh_integration"
+required-features = ["test-utils"]
+
+[[test]]
+name = "feed_fixtures"
+required-features = ["test-utils"]
+
 [lints]
 workspace = true

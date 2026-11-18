@@ -1,0 +1,24 @@
+{
+  "version": "https://jsonfeed.org/version/1.1",
+  "title": "Metro Fixture JSON",
+  "home_page_url": "https://json.example.com/",
+  "feed_url": "https://json.example.com/feed.json",
+  "description": "JSON Feed 1.1 fixture for parser tests (metro-core tests/feed_fixtures.rs). Covers content_html, content_text, authors, an untitled item, and date_modified as the date fallback. Changing values here requires updating the assertions in that test.",
+  "items": [
+    {
+      "id": "json-1",
+      "url": "https://json.example.com/posts/1",
+      "title": "First JSON item",
+      "summary": "Summary of the first item",
+      "content_html": "<p>Full content of the first item</p>",
+      "date_published": "2026-03-01T09:15:00Z",
+      "authors": [{ "name": "Ada Lovelace" }]
+    },
+    {
+      "id": "json-2",
+      "url": "https://json.example.com/posts/2",
+      "content_text": "An untitled note",
+      "date_modified": "2026-03-02T00:00:00Z"
+    }
+  ]
+}
