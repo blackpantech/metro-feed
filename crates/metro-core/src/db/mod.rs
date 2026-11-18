@@ -94,6 +94,10 @@ pub fn open<P: AsRef<Path>>(path: P) -> Result<Connection, MetroError> {
 }
 
 /// Open an in-memory database connection for testing.
+///
+/// # Errors
+///
+/// Returns an error if the in-memory database cannot be opened or configured.
 #[cfg(feature = "test-utils")]
 pub fn open_in_memory() -> Result<Connection, MetroError> {
     let conn = Connection::open(":memory:")?;
