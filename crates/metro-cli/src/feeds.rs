@@ -13,7 +13,7 @@
 //! `FromStr`). A bare number or another prefix is rejected by `clap` as a
 //! usage error (exit 2) with a hint about the expected `f<number>` form.
 //! `--folder <name>` is always resolved in the **feed** folder namespace
-//! (MVP spec §7) with `metro_core::folders::find_folder` (case-insensitive,
+//! (MVP spec §7) with `metro_core::store::folders::find_folder` (case-insensitive,
 //! `NotFound` → exit 3).
 //!
 //! This module only parses arguments and renders results. Every rule lives in
@@ -30,7 +30,7 @@
 //!
 //! # `feeds add`
 //!
-//! Delegates to `metro_core::refresh::subscribe_url`, which validates the
+//! Delegates to `metro_core::feed_sync::subscribe_url`, which validates the
 //! input, reports an already-subscribed URL without network access, then
 //! requests the URL once and classifies the response by its body, whatever
 //! its `Content-Type`: a feed is stored from that very response (one
@@ -48,7 +48,7 @@
 //! # Batch commands
 //!
 //! `remove` and `move` accept several IDs and are all-or-nothing
-//! (`metro_core::feeds::remove_feeds` / `move_feeds` run in one transaction):
+//! (`metro_core::store::feeds::remove_feeds` / `move_feeds` run in one transaction):
 //! one unknown ID fails the command and changes nothing.
 //!
 //! # Output
@@ -84,14 +84,14 @@ use std::collections::HashMap;
 
 use clap::{Args, Subcommand};
 use metro_core::MetroError;
-use metro_core::discovery::{FeedDiscoverer, HttpDiscoverer};
-use metro_core::feeds::{
+use metro_core::feed_sync::{FeedFetcher, FeedPreview, SubscribeOutcome, subscribe_url};
+use metro_core::http::client::Fetcher;
+use metro_core::http::discovery::{FeedDiscoverer, HttpDiscoverer};
+use metro_core::models::{Feed, FeedId, Folder, FolderId, FolderKind};
+use metro_core::store::feeds::{
     FeedInfo, get_feed_info, list_feeds, move_feeds, remove_feeds, rename_feed,
 };
-use metro_core::fetch::Fetcher;
-use metro_core::folders::{DEFAULT_FOLDER_NAME, find_folder, list_folders};
-use metro_core::models::{Feed, FeedId, Folder, FolderId, FolderKind};
-use metro_core::refresh::{FeedFetcher, FeedPreview, SubscribeOutcome, subscribe_url};
+use metro_core::store::folders::{DEFAULT_FOLDER_NAME, find_folder, list_folders};
 use rusqlite::Connection;
 use serde::Serialize;
 
@@ -582,10 +582,11 @@ mod command_tests {
 
     use metro_core::db::migrations::run_migrations;
     use metro_core::db::open_in_memory;
-    use metro_core::discovery::Discovery;
-    use metro_core::fetch::{FeedMetadata, FetchResult, FetchStatus, FetchedEntry};
-    use metro_core::folders::create_folder;
+    use metro_core::http::client::{FetchResult, FetchStatus};
+    use metro_core::http::discovery::Discovery;
     use metro_core::models::FeedKind;
+    use metro_core::parse::{FeedMetadata, FetchedEntry};
+    use metro_core::store::folders::create_folder;
 
     use super::*;
     use crate::output::OutputFormat;
@@ -1118,7 +1119,7 @@ mod command_tests {
     #[test]
     fn test_info_never_fetched_feed() {
         let mut conn = test_conn();
-        metro_core::feeds::add_feed(&mut conn, FEED_URL, None, None).unwrap();
+        metro_core::store::feeds::add_feed(&mut conn, FEED_URL, None, None).unwrap();
 
         let text = exec(
             &mut conn,

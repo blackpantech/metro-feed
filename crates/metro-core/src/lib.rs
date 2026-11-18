@@ -1,22 +1,28 @@
 //! Metro core library.
 //!
-//! Provides error types, configuration loading, database connectivity, data
-//! models, the folder management API, the feed management API, the entry
-//! listing API, URL
-//! autodiscovery, HTTP feed fetching, the threaded refresh pipeline
-//! (including subscribe-time fetching), and age-based entry pruning.
+//! All product logic shared by the CLI and TUI frontends. Modules are grouped
+//! by the question they answer, and dependencies point one way
+//! (`feed_sync` → `http` / `parse` / `store` → `db` / `url` / `models`):
+//!
+//! - [`db`]: how we connect (open, pragmas, migrations, row decoders).
+//! - [`store`]: what we persist and the rules on it (folders, feeds, entries,
+//!   pruning).
+//! - [`http`]: how we talk to the network (the fetch client, autodiscovery).
+//! - [`parse`]: turning feed bytes into entries, with no I/O.
+//! - [`url`]: feed URL normalization, with no I/O.
+//! - [`feed_sync`]: getting fetched data into the database (refresh,
+//!   subscribe, dedup, backoff).
+//! - [`models`], [`error`], [`config`]: shared types, errors, configuration.
 
 pub mod config;
 pub mod db;
-pub mod discovery;
-pub mod entries;
 pub mod error;
-pub mod feeds;
-pub mod fetch;
-pub mod folders;
+pub mod feed_sync;
+pub mod http;
 pub mod models;
-pub mod prune;
-pub mod refresh;
+pub mod parse;
+pub mod store;
+pub mod url;
 
 #[cfg(feature = "test-utils")]
 pub mod test_utils;

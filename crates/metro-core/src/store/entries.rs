@@ -15,7 +15,7 @@
 //! - **Ordering: newest first.** Entries are sorted by their *effective
 //!   date*, descending: the feed's `published` date, or the `first_seen`
 //!   insertion time when the feed omitted it. This is the same date
-//!   [`crate::prune`] uses to measure an entry's age, so the list order and
+//!   [`crate::store::prune`] uses to measure an entry's age, so the list order and
 //!   the pruning order agree. Entries with no known date at all (`published`
 //!   missing and `first_seen` unset, `0`) come last. Ties (same second) are
 //!   broken by entry ID, descending, so the most recently inserted entry
@@ -33,7 +33,7 @@
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use crate::MetroError;
-use crate::feeds::{feed_id_from_row_id, timestamp_from_row};
+use crate::db::rows::{feed_id_from_row_id, timestamp_from_row};
 use crate::models::{Entry, EntryId, FeedId};
 
 /// Number of entries [`EntryLimit::Recent`] returns.
@@ -231,7 +231,7 @@ mod tests {
     use super::*;
     use crate::db::migrations::run_migrations;
     use crate::db::open_in_memory;
-    use crate::feeds::add_feed;
+    use crate::store::feeds::add_feed;
 
     fn test_conn() -> Connection {
         let mut conn = open_in_memory().unwrap();

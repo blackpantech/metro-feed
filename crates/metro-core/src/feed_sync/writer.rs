@@ -63,11 +63,11 @@
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
 use crate::MetroError;
-use crate::feeds::next_retry_at;
-use crate::fetch::{FetchResult, FetchStatus};
+use crate::feed_sync::backoff::next_retry_at;
+use crate::feed_sync::dedup::{dedup_key, entry_url};
+use crate::http::client::{FetchResult, FetchStatus};
 use crate::models::FeedId;
-use crate::prune::is_outside_window;
-use crate::refresh::dedup::{dedup_key, entry_url};
+use crate::store::prune::is_outside_window;
 
 /// Insert one entry unless its key or (non-empty) URL is already stored for
 /// the same feed.

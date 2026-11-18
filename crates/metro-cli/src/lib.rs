@@ -604,7 +604,7 @@ mod end_to_end_tests {
     fn add_feeds_offline(db: &TempDb, urls: &[String]) {
         let mut conn = metro_core::db::open_migrated(&db.0).unwrap();
         for url in urls {
-            metro_core::feeds::add_feed(&mut conn, url, None, None).unwrap();
+            metro_core::store::feeds::add_feed(&mut conn, url, None, None).unwrap();
         }
     }
 

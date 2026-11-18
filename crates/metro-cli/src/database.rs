@@ -12,7 +12,7 @@
 //!
 //! The default `Unsorted` folder is *not* created here: per the
 //! `folder-management` spec it appears on first use (the first feed added
-//! without `--folder`), which `metro_core::feeds` handles. Keeping `open`
+//! without `--folder`), which `metro_core::store::feeds` handles. Keeping `open`
 //! free of writes also keeps read-only commands from taking the write lock.
 
 use std::path::Path;

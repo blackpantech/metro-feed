@@ -14,7 +14,7 @@
 //! This module only parses arguments and renders results; all rules (name
 //! trimming, case-insensitive lookup, duplicate rejection, refusing to remove
 //! a non-empty folder, protecting the default `Unsorted` feed folder) are
-//! enforced by `metro_core::folders`, and errors are
+//! enforced by `metro_core::store::folders`, and errors are
 //! returned untouched so their [`MetroError`] variant decides the exit code:
 //!
 //! | Situation                          | Core error              | Exit |
@@ -37,10 +37,10 @@
 
 use clap::{Args, Subcommand, ValueEnum};
 use metro_core::MetroError;
-use metro_core::folders::{
+use metro_core::models::{Folder, FolderKind};
+use metro_core::store::folders::{
     create_new_folder, delete_folder, find_folder, list_folders, rename_folder,
 };
-use metro_core::models::{Folder, FolderKind};
 use rusqlite::Connection;
 
 use crate::output::Output;
@@ -124,7 +124,7 @@ fn folder_columns(folder: &Folder) -> Vec<String> {
 ///
 /// # Errors
 ///
-/// Any [`MetroError`] from `metro_core::folders` (see the module table for
+/// Any [`MetroError`] from `metro_core::store::folders` (see the module table for
 /// the exit codes), or [`MetroError::Generic`] if writing output fails.
 pub fn run(
     args: &FoldersArgs,
@@ -270,8 +270,8 @@ mod tests {
 mod command_tests {
     use metro_core::db::migrations::run_migrations;
     use metro_core::db::open_in_memory;
-    use metro_core::feeds::add_feed;
-    use metro_core::folders::{create_folder, ensure_default};
+    use metro_core::store::feeds::add_feed;
+    use metro_core::store::folders::{create_folder, ensure_default};
 
     use super::*;
     use crate::output::OutputFormat;

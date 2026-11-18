@@ -73,7 +73,7 @@
 //! # Testing seam
 //!
 //! Callers that orchestrate discovery (such as
-//! [`crate::refresh::subscribe_url`], used by `metro feeds add`) depend on
+//! [`crate::feed_sync::subscribe_url`], used by `metro feeds add`) depend on
 //! the [`FeedDiscoverer`] trait rather than on [`HttpDiscoverer`] directly
 //! (dependency inversion, like `FeedFetcher` for fetching). Tests inject
 //! mocks, or point an [`HttpDiscoverer`] at a local server, and never hit
@@ -85,8 +85,8 @@ use scraper::{Html, Selector};
 use url::Url;
 
 use crate::MetroError;
-use crate::feeds::normalize_url;
-use crate::fetch::{FetchConfig, FetchResult, FetchedDocument, Fetcher, NotAFeed};
+use crate::http::client::{FetchConfig, FetchResult, FetchedDocument, Fetcher, NotAFeed};
+use crate::url::normalize_url;
 
 /// Media types accepted on `<link type="...">` tags for feed autodiscovery.
 const FEED_LINK_TYPES: &[&str] = &[
@@ -119,7 +119,7 @@ pub const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(15);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Discovery {
     /// The URL serves a feed. Carries the parsed first response
-    /// ([`FetchStatus::Modified`](crate::fetch::FetchStatus::Modified), with
+    /// ([`FetchStatus::Modified`](crate::http::client::FetchStatus::Modified), with
     /// its validators), to be used as the subscription fetch instead of
     /// requesting the URL again.
     Feed(FetchResult),
@@ -354,7 +354,7 @@ fn is_alternate(token: &str) -> bool {
 mod tests {
     use super::*;
 
-    use crate::fetch::FetchStatus;
+    use crate::http::client::FetchStatus;
 
     /// Wrap a fragment of markup in a minimal HTML document.
     fn document(head: &str) -> String {
