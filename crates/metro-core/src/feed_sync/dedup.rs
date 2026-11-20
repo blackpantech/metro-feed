@@ -4,7 +4,7 @@
 //! content hash**, and every tier is scoped **per feed**: two feeds that
 //! publish the same guid or URL each keep their own entry. This module turns
 //! a [`FetchedEntry`] into the single key stored in the `entries.guid`
-//! column, whose `UNIQUE(feed_id, guid)` constraint (design decision D2) then
+//! column, whose `UNIQUE(feed_id, guid)` constraint then
 //! lets `INSERT OR IGNORE` skip duplicates within a feed atomically:
 //!
 //! 1. the entry's own guid, trimmed, when it is not blank;

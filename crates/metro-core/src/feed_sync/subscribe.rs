@@ -1,4 +1,5 @@
-//! Subscribe-time first fetch (design decision D11).
+//! Subscribe-time first fetch: subscribing fetches the feed before writing,
+//! so the real kind and title are stored at once and dead URLs fail fast.
 //!
 //! [`subscribe_feed`] subscribes to a known feed URL; `metro feeds add` goes
 //! through [`subscribe_url`], which adds autodiscovery and shares the same
@@ -125,7 +126,7 @@ pub enum SubscribeOutcome {
     },
 }
 
-/// Fetch a feed and subscribe to it in one transaction (design D11).
+/// Fetch a feed and subscribe to it in one transaction.
 ///
 /// See the [module documentation](self) for the exact flow. `folder_id`
 /// `None` means the default `Unsorted` folder. `title` overrides the feed's

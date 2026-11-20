@@ -62,7 +62,7 @@ Modules are grouped by concern, with one-way dependencies `feed_sync/` → `http
   - **`discovery.rs`** — `HttpDiscoverer` (behind the `FeedDiscoverer` trait) makes **one** request and classifies the body whatever its `Content-Type`: parsed as a feed first (`Discovery::Feed`, reused as the subscription fetch), else scanned as HTML for `<link rel="alternate">` (`Discovery::Link`).
 - **`parse.rs`** — `parse_feed` normalizes RSS / Atom / JSON Feed bytes via `feed-rs` into `FeedMetadata` + `FetchedEntry`. No I/O.
 - **`url.rs`** — `normalize_url` (dedup key for feeds, also used by discovery) and `url_origin` (placeholder title / site URL). No I/O.
-- **`feed_sync/`** — everything that writes fetched data into the DB. `refresh_feeds` (`mod.rs`): scoped `std::thread` worker pool (default 8) behind the `FeedFetcher` trait, single DB writer (`writer.rs`, one `IMMEDIATE` transaction per feed), backoff skip, progress channel, post-refresh prune. Retry schedule lives in `backoff.rs` (`next_retry_at`). Entry dedup (`dedup.rs`, guid → url → content hash) is scoped **per feed** (`UNIQUE(feed_id, guid)`). Entries already outside the prune window are never inserted. `subscribe.rs` has `subscribe_feed` / `subscribe_url` (fetch at add time, D11).
+- **`feed_sync/`** — everything that writes fetched data into the DB. `refresh_feeds` (`mod.rs`): scoped `std::thread` worker pool (default 8) behind the `FeedFetcher` trait, single DB writer (`writer.rs`, one `IMMEDIATE` transaction per feed), backoff skip, progress channel, post-refresh prune. Retry schedule lives in `backoff.rs` (`next_retry_at`). Entry dedup (`dedup.rs`, guid → url → content hash) is scoped **per feed** (`UNIQUE(feed_id, guid)`). Entries already outside the prune window are never inserted. `subscribe.rs` has `subscribe_feed` / `subscribe_url` (fetch at add time, so the real kind and title are stored at once and dead URLs fail fast).
 
 Module-level `//!` docs in each file document semantics and design decisions in detail; read them before modifying a module.
 
@@ -73,6 +73,7 @@ Module-level `//!` docs in each file document semantics and design decisions in 
 - Avoid using `crate::` or `super::` in production code. Import them explicitly at the top of files.
 - Avoid using `.clone()`.
 - No `.unwrap()` in production code. Catch all errors to avoid panics and crashes.
+- Never reference tickets (`T-07`, `docs/tickets/…`) or OpenSpec design decision IDs (`D6`, "design decision D11", "open question 1") in code, comments, docs, or tests. Tickets are temporary local files that are never pushed, and decision numbers are scoped to one change's `design.md` (archived afterwards), so both become dangling references. Write a short summary of the rule or rationale inline instead (e.g. "`last_fetch` is success-only, so `IS NULL` means never fetched" rather than "(D6)"). Spec references (`spec §4`, "`backoff` spec") are fine: specs are committed.
 
 ## Test conventions
 
@@ -90,8 +91,8 @@ Module-level `//!` docs in each file document semantics and design decisions in 
 This project uses the **spec-driven** OpenSpec schema. Change artifacts live in `openspec/changes/`, main specs in `openspec/specs/`. In Claude Code the workflow is exposed as `/opsx:propose`, `/opsx:apply`, `/opsx:explore`, `/opsx:archive`, `/opsx:sync`, `/opsx:update` (`.claude/commands/opsx/`, `.claude/skills/openspec-*`); OpenCode equivalents live in `.opencode/`.
 
 - `docs/metro-feed-mvp-spec.md` — product spec (milestones M0–M7, performance budgets referenced as "spec §N").
-- `docs/tickets/T-*.md` — per-task tickets for the current milestone.
-- `openspec/changes/m1-feeds-core/` — active change (`proposal.md`, `design.md` with decisions `D<N>`, `tasks.md`). Each numbered section in `tasks.md` is one planned commit; mark tasks `- [x]` as they are completed.
+- `docs/tickets/T-*.md` — per-task tickets for the current milestone. **Temporary and never pushed**; see the rule under Code cleanliness.
+- `openspec/changes/<change>/` — the active change, if any (`proposal.md`, `design.md` with decisions `D<N>`, `tasks.md`). Each numbered section in `tasks.md` is one planned commit; mark tasks `- [x]` as they are completed. No change is active right now; completed ones are archived under `openspec/changes/archive/` (`2026-11-11-m0-foundations`, `2026-11-18-m1-feeds-core`).
 - `openspec/config.yaml` holds per-artifact authoring rules and `operations.apply.guidance`. When implementing tasks: work on one task section at a time and stop after each; annotate not-yet-used code with `#[cfg_attr(not(test), expect(dead_code, reason = "..."))]`; finish each commit with fmt → clippy `-D warnings` → `cargo test --workspace`, and each feature with the release `test-utils` run plus `clippy::pedantic`, fixing issues before running the next command.
 
 Commit messages follow the `feat: adding <thing>` style seen in history.

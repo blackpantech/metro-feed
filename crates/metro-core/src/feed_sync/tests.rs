@@ -287,7 +287,7 @@ fn test_duplicate_url_with_different_guid_is_skipped() {
     assert_eq!(entry_count(&conn, id), 1);
 }
 
-/// Dedup is scoped per feed (D2): the same guid published by two feeds is
+/// Dedup is scoped per feed: the same guid published by two feeds is
 /// two entries, one per feed.
 #[test]
 fn test_same_guid_in_two_feeds_stores_two_entries() {

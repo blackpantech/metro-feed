@@ -11,8 +11,8 @@
 //!
 //! An entry's age is measured from its **`published`** date. When the feed
 //! omitted it (`published IS NULL`), the entry's **`first_seen`** date (set by
-//! the refresh writer to the insertion time) is used instead (design decision
-//! D7, open question 1: an explicit `first_seen` column rather than `ROWID`).
+//! the refresh writer to the insertion time) is used instead (an explicit `first_seen`
+//! column rather than `ROWID`, so the fallback does not depend on row-id order).
 //!
 //! `first_seen = 0` is the schema's "unset" marker (`DEFAULT 0`). An entry
 //! with neither a `published` date nor a set `first_seen` has **no known

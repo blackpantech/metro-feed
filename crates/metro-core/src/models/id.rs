@@ -1,6 +1,6 @@
 //! Typed ID wrappers for compile-time safety.
 //!
-//! Each ID type is a newtype wrapper around `u64` (design decision D9), so a
+//! Each ID type is a newtype wrapper around `u64` (zero runtime cost), so a
 //! [`FolderId`] can never be passed where a [`FeedId`] is expected. Every type
 //! has its own textual prefix:
 //!
