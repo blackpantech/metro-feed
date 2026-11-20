@@ -38,9 +38,9 @@
 //!   - `last_fetch`: `NULL` (never fetched successfully).
 //!
 //!   The first successful refresh then replaces the placeholders: `kind` and
-//!  `site_url` are updated on every `200` response, and `title` is filled from the
-//!  feed only while `last_fetch` is still `NULL`, so a title supplied here or set
-//!  later through [`rename_feed`] is never overwritten afterwards.
+//!   `site_url` are updated on every `200` response, and `title` is filled from the
+//!   feed only while `last_fetch` is still `NULL`, so a title supplied here or set
+//!   later through [`rename_feed`] is never overwritten afterwards.
 //!
 //!   [`add_feed`] is the network-free building block for offline and import
 //!   paths. Interactive subscription (`metro feeds add`) goes through
