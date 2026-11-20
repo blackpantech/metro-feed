@@ -31,23 +31,22 @@
 //!   and `kind` to be `NOT NULL`, but [`add_feed`] only receives a URL, an
 //!   optional title, and an optional folder, and it never touches the
 //!   network. Until the feed is first fetched (the parsed document is
-//!   authoritative for kind and site URL, design decision D5), it stores:
+//!   authoritative for kind and site URL), it stores:
 //!   - `title`: the supplied title, or the URL's lowercased host,
 //!   - `site_url`: the URL's origin (`scheme://host[:port]`),
 //!   - `kind`: [`FeedKind::Rss`] as a placeholder,
 //!   - `last_fetch`: `NULL` (never fetched successfully).
 //!
-//!   The first successful refresh then replaces the placeholders (design
-//!   decision D10): `kind` and `site_url` are updated on every `200`
-//!   response, and `title` is filled from the feed only while `last_fetch`
-//!   is still `NULL`, so a title supplied here or set later through
-//!   [`rename_feed`] is never overwritten afterwards.
+//!   The first successful refresh then replaces the placeholders: `kind` and
+//!  `site_url` are updated on every `200` response, and `title` is filled from the
+//!  feed only while `last_fetch` is still `NULL`, so a title supplied here or set
+//!  later through [`rename_feed`] is never overwritten afterwards.
 //!
 //!   [`add_feed`] is the network-free building block for offline and import
 //!   paths. Interactive subscription (`metro feeds add`) goes through
 //!   [`crate::feed_sync::subscribe_feed`] instead, which fetches the feed first
 //!   and inserts the real metadata and initial entries in one transaction
-//!   (design decision D11), so its rows never carry placeholders except the
+//!   (users see the real kind and title at once, and dead URLs fail fast), so its rows never carry placeholders except the
 //!   host title when the feed declares none.
 //!
 //! # Concurrency

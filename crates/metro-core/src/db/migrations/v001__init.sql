@@ -32,7 +32,8 @@ CREATE TABLE IF NOT EXISTS feeds (
 -- Entries table: individual items from feeds.
 -- `guid` holds the refresh dedup key (guid -> url -> content hash). It is
 -- unique per feed, not globally: two feeds publishing the same guid each keep
--- their own entry (design D2).
+-- their own entry (mirrors, aggregators and per-tag feeds legitimately share
+-- guids, so a global constraint would silently drop entries).
 CREATE TABLE IF NOT EXISTS entries (
     id INTEGER PRIMARY KEY,
     feed_id INTEGER NOT NULL,

@@ -192,7 +192,7 @@ mod tests {
         assert_eq!(count_after, 0);
     }
 
-    /// `entries` dedup keys are unique per feed (design D2): a duplicate
+    /// `entries` dedup keys are unique per feed: a duplicate
     /// guid within one feed is rejected, the same guid in another feed is
     /// accepted.
     #[test]
@@ -305,7 +305,8 @@ mod tests {
         assert!(indexes.contains(&"idx_feeds_next_retry".to_string()));
     }
 
-    /// `feeds` carries the backoff state of the `backoff` spec (design D6):
+    /// `feeds` carries the backoff state of the `backoff` spec (two
+    /// columns, so the skip decision is one comparison against now):
     /// `consecutive_failures INTEGER DEFAULT 0`, a nullable
     /// `next_retry INTEGER` (Unix seconds), and the nullable failure
     /// timestamp `last_error_at INTEGER` (Unix seconds) of the

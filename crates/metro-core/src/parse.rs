@@ -21,8 +21,9 @@
 //!   updated date (Atom feeds often only carry `<updated>`). Dates before the
 //!   Unix epoch are dropped.
 //!
-//! The feed kind is inferred from the parsed format (design decision D5), not
-//! from the URL or the response `Content-Type`.
+//! The feed kind is inferred from the parsed format, not
+//! from the URL or the response `Content-Type`: the content is authoritative,
+//! which avoids misclassifying feeds that claim one type but deliver another.
 //!
 //!
 //! # Errors

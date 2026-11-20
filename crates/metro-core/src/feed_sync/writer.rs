@@ -11,11 +11,11 @@
 //!
 //! | Column | `200` (modified) | `304` (not modified) |
 //! |---|---|---|
-//! | `kind` | parsed kind (D5, D10) | unchanged |
+//! | `kind` | parsed kind (the document is authoritative) | unchanged |
 //! | `site_url` | parsed alternate link, kept when the feed declares none | unchanged |
-//! | `title` | parsed title **only while `last_fetch IS NULL`** and non-blank (D10) | unchanged |
+//! | `title` | parsed title **only while `last_fetch IS NULL`** and non-blank, so user titles are never overwritten | unchanged |
 //! | `etag`, `last_modified` | the response's validators (may become `NULL`) | the validators reported by the fetcher (cached ones preserved) |
-//! | `last_fetch` | now (D6) | now (D6) |
+//! | `last_fetch` | now | now |
 //! | `error_state`, `last_error_at` | cleared | cleared |
 //! | `consecutive_failures`, `next_retry` | reset to `0` / `NULL` | reset to `0` / `NULL` |
 //! | entries | inserted with dedup, out-of-window ones skipped | none |
@@ -27,9 +27,9 @@
 //! incremented, and `next_retry` is set to that same failure time plus the
 //! exponential backoff delay for the new counter value, computed by
 //! [`next_retry_at`] (1m, 5m, 30m, 2h, 12h, then 24h for every further
-//! failure; `backoff` spec, D6). Until that deadline passes, the refresh
+//! failure; `backoff` spec). Until that deadline passes, the refresh
 //! pipeline skips the feed (see `refresh::partition_by_backoff`).
-//! `last_fetch` is never touched by a failure (D6), so `last_fetch IS NULL`
+//! `last_fetch` is never touched by a failure, so `last_fetch IS NULL`
 //! keeps meaning "never fetched successfully".
 //!
 //! # Entry deduplication
@@ -37,7 +37,7 @@
 //! Deduplication is scoped **per feed**: two feeds that publish the same
 //! guid or URL each keep their own entry. Each entry is inserted with
 //! `INSERT OR IGNORE` keyed on [`dedup_key`] (guid → url → content hash)
-//! through the `UNIQUE(feed_id, guid)` constraint (D2). In addition, an entry
+//! through the `UNIQUE(feed_id, guid)` constraint. In addition, an entry
 //! whose non-empty URL already exists **in the same feed** is skipped even
 //! when its guid is new, which is the spec's "duplicate url is skipped" rule;
 //! the guard is served by the `idx_entries_feed_url` index on
@@ -90,7 +90,8 @@ pub(crate) fn now_unix() -> i64 {
 /// Persist a successful refresh fetch in its own `IMMEDIATE` transaction.
 ///
 /// The parsed feed title (if any) is offered as the title candidate, so it
-/// is applied only on the feed's first successful fetch (D10). Entries
+/// is applied only on the feed's first successful fetch: titles are user-editable and the schema has
+/// no "custom title" flag, so a title is set once and never overwritten. Entries
 /// dated before `cutoff` (Unix seconds, from `prune::window_cutoff`) are
 /// skipped; see the module documentation.
 ///
@@ -260,7 +261,7 @@ fn insert_entries(
 /// (now), increments `consecutive_failures`, and sets `next_retry` to the
 /// backoff deadline from [`next_retry_at`] for the incremented counter,
 /// relative to that same failure time. `last_fetch` is left
-/// untouched (D6). A feed that was removed meanwhile is silently ignored:
+/// untouched (it is success-only). A feed that was removed meanwhile is silently ignored:
 /// there is no row left to annotate.
 ///
 /// # Errors

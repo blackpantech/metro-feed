@@ -2,7 +2,7 @@
 //!
 //! This module implements the `refresh` capability of the M1 milestone and
 //! the subscribe-time first fetch of the `feed-management` capability
-//! ([`subscribe_feed`], design decision D11).
+//! ([`subscribe_feed`]).
 //!
 //! # Architecture
 //!
@@ -25,8 +25,9 @@
 //!          RefreshEvent progress channel (optional) + RefreshReport
 //! ```
 //!
-//! - **Worker pool** (D1): plain `std::thread` scoped threads, no async
-//!   runtime. The pool size defaults to [`DEFAULT_CONCURRENCY`] (8) and is
+//! - **Worker pool**: plain `std::thread` scoped threads, no async
+//!   runtime (the HTTP client is blocking and refresh is infrequent, so an
+//!   async runtime would only double the dependency surface). The pool size defaults to [`DEFAULT_CONCURRENCY`] (8) and is
 //!   capped by the number of due feeds. Workers pull the next job from a
 //!   shared atomic index, so a slow feed never blocks the others.
 //! - **Single writer**: workers never touch SQLite. The thread that called
@@ -38,7 +39,7 @@
 //!   and in the [`RefreshReport`]; the remaining feeds are still fetched. A
 //!   **database** error, by contrast, is systemic: the writer stops the
 //!   workers and [`refresh_feeds`] returns the error.
-//! - **Backoff** (D6): a failure sets `next_retry` to the failure time plus
+//! - **Backoff**: a failure sets `next_retry` to the failure time plus
 //!   the exponential delay for the feed's new `consecutive_failures` value
 //!   ([`backoff::next_retry_at`]: 1m, 5m, 30m, 2h, 12h, 24h max). Feeds
 //!   whose `next_retry` lies in the future are not fetched (not even when

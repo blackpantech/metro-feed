@@ -3,7 +3,7 @@
 //! A feed whose fetch fails is not retried on every refresh: the refresh
 //! writer stores a `next_retry` deadline computed by [`next_retry_at`] and
 //! the refresh pipeline skips the feed until that deadline has passed
-//! (`backoff` spec, design decision D6). The delay depends only on the
+//! (`backoff` spec). The delay depends only on the
 //! feed's `consecutive_failures` counter **after** it was incremented for
 //! the current failure, and grows along [`BACKOFF_SCHEDULE`]:
 //!
