@@ -33,15 +33,50 @@ Your subscriptions live in YouTube's addictive algorithm feed, your saved articl
 1. **A fully functional CLI** — every feature (feeds, saving, triage, reading) usable from the shell, scriptable, cron-friendly, great over SSH.
 2. **A snappy TUI** — vim-style and arrow-key navigation, panes with folders/feeds/items, in-app reader — built on the proven core, with zero duplicated logic.
 
-## Planned usage
+## Usage
+
+### Available now (M1)
 
 ```sh
-metro feeds add https://example.com/feed.xml         # follow a blog
+# Feeds
+metro feeds add https://example.com/feed.xml              # follow a feed (RSS, Atom or JSON Feed)
+metro feeds add https://example.com --folder tech         # blog homepage: feed found by autodiscovery
+metro feeds add https://example.com/feed.xml --dry-run    # fetch and preview without saving
+metro feeds list                                          # grouped by folder (flat with --folder)
+metro feeds info f12                                      # URL, last fetch, error state, entry count
+metro feeds rename f12 "My favourite blog"
+metro feeds move f12 f13 --folder reading
+metro feeds remove f12                                    # unsubscribes and deletes its entries
+
+# Folders (feed folders by default, --kind saved for saved-item folders)
+metro folders list
+metro folders add tech
+metro folders rename tech dev
+metro folders remove dev                                  # refuses non-empty folders and Unsorted
+
+# Refresh and read
+metro refresh                                             # every feed, in parallel (cron-friendly)
+metro refresh f12 f13 --jobs 4                            # only some feeds, 4 workers
+metro refresh --folder tech                               # only one folder
+metro view f12                                            # 20 most recent entries
+metro view f12 --unread --limit 50                        # or --all for every entry
+
+# Scripting
+metro --json feeds list | jq -r .id                       # NDJSON output; IDs are reusable as arguments
+metro --db /tmp/test.db feeds list                        # use another database file
+```
+
+IDs carry a type prefix (`fo3` folder, `f12` feed, `e4031` entry), so a folder ID is never mistaken for a feed ID. Exit codes are stable for scripts: `0` ok, `1` error, `2` usage, `3` not found, `4` network, `5` partial success (e.g. some feeds failed to refresh).
+
+### Coming next
+
+```sh
 metro feeds add @ThePrimeTimeagen                    # follow a YouTube channel
-metro add https://example.com/article --folder tech  # add a link to the `tech` folder
+metro import subscriptions.opml                      # OPML, NewPipe, Takeout, Pocket
+metro save https://example.com/article --folder tech # save a link to read later
 metro list unread
-metro view 42                                        # read in the terminal
-metro refresh                                        # cron-friendly headless refresh
+metro read e4031                                     # read an article in the terminal
+metro search "rust async"
 metro                                                # the TUI (later milestone)
 ```
 
@@ -60,4 +95,8 @@ metro                                                # the TUI (later milestone)
 
 ## Status
 
-✅ **M0 complete.** Workspace foundation, database layer, configuration system, and CI infrastructure are implemented and tested. Ready for M1 development.
+✅ **M0 complete.** Workspace foundation, database layer, configuration system, and CI infrastructure.
+
+✅ **M1 complete.** Feed subscriptions (RSS, Atom, JSON Feed, blog homepage autodiscovery), feed folders, parallel `refresh` with conditional GET and exponential backoff for failing feeds, 30-day entry pruning, and `view` — all usable from the CLI with `--json` output. Refreshing 50 feeds stays well under the 10 s budget, and a second refresh is nearly free thanks to `304 Not Modified`.
+
+🚧 **Next:** YouTube channel resolution and subscription import/export (OPML, NewPipe, Takeout).
