@@ -1,0 +1,28 @@
+[package]
+# Published as `metro-feed` (`metro` is taken on crates.io); the installed
+# command is still `metro`, see `[[bin]]` below.
+name = "metro-feed"
+description = "Metro, a terminal RSS / Atom / JSON Feed reader (installs the `metro` command)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[[bin]]
+name = "metro"
+path = "src/main.rs"
+
+[dependencies]
+metro-cli = { workspace = true }
+metro-tui = { workspace = true }
+metro-core = { workspace = true, optional = true }
+
+[features]
+test-utils = ["metro-core/test-utils"]
+
+[lints]
+workspace = true

@@ -1,0 +1,42 @@
+[package]
+name = "metro-core"
+description = "Core library of the Metro feed reader: storage, fetching, parsing and refresh"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+thiserror = { workspace = true }
+directories = { workspace = true }
+jiff = { workspace = true }
+ureq = { workspace = true }
+feed-rs = { workspace = true }
+scraper = { workspace = true }
+url = { workspace = true }
+
+[features]
+test-utils = []
+
+# Integration tests use the `test-utils` helpers (temp databases, shared
+# fixtures). `required-features` makes Cargo skip these targets entirely when
+# the feature is off, so `cargo test --workspace` (no features) still builds
+# and passes; `cargo test --workspace --features test-utils` runs them.
+[[test]]
+name = "refresh_integration"
+required-features = ["test-utils"]
+
+[[test]]
+name = "feed_fixtures"
+required-features = ["test-utils"]
+
+[lints]
+workspace = true
