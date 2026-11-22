@@ -5,9 +5,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Workspace
 
 - **Rust workspace**, edition **2024**, resolver 3. No `default-members`; `cargo build` without args builds all four crates.
-- Crates: `metro` (dispatcher bin), `metro-cli` (lib), `metro-tui` (lib), `metro-core` (lib — all product logic).
+- Crates: `metro-feed` (dispatcher bin in `crates/metro/`, published under that name because `metro` is taken on crates.io; its `[[bin]]` is still `metro`), `metro-cli` (lib), `metro-tui` (lib), `metro-core` (lib — all product logic).
 - `metro` binary routes: no args → `metro_tui::run()`, any argv → `metro_cli::run()`.
-- `metro-core` is an optional dep of `metro` and `metro-tui`. `metro`, `metro-cli`, and `metro-tui` all expose a `test-utils` feature that pipes through to `metro-core/test-utils`.
+- Sibling crates are declared once in `[workspace.dependencies]` with `path` plus an exact `version = "=X.Y.Z"` pin (required for crates.io). A version bump edits `package.version` **and** those three pins in the root `Cargo.toml`.
+- `metro-core` is an optional dep of `metro-feed` and `metro-tui`. `metro-feed`, `metro-cli`, and `metro-tui` all expose a `test-utils` feature that pipes through to `metro-core/test-utils`.
 
 ## Commands
 
@@ -102,4 +103,5 @@ Commit messages follow the `feat: adding <thing>` style seen in history.
 - `metro --help` and `metro --version` route through clap **even with no subcommand** (`metro --help` invokes the CLI; `metro` alone invokes the TUI stub).
 - CLI global flags `-v/--verbose` and `--log` are accepted since M0 but still inert (not wired up yet); `--json` and `--db` are live.
 - Exit codes: `0` ok, `1` generic error, `2` usage error, `3` not found, `4` network error, `5` partial success. Defined in `metro-core/src/error.rs`.
-- CI runs on every push (all branches) and PRs to `main` / `develop`, across Linux + macOS + Windows. No local pre-commit hooks.
+- CI (`ci.yml`) runs on every push except to `main`, and on PRs to `main` / `develop`, across Linux + macOS + Windows. No local pre-commit hooks.
+- A push to `main` runs `release.yml`: validations (reusing `ci.yml`), multi-platform archives, tag `X.Y.Z` from `package.version`, GitHub release, `cargo publish --workspace` to crates.io, then a rebase of `develop` onto `main`. It fails early if the tag already exists, so bump the version before merging.

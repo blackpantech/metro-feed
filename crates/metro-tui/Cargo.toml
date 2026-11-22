@@ -1,10 +1,17 @@
 [package]
 name = "metro-tui"
+description = "Terminal UI frontend of the Metro feed reader"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
-metro-core = { path = "../metro-core", optional = true }
+metro-core = { workspace = true, optional = true }
 
 [features]
 test-utils = ["metro-core/test-utils"]

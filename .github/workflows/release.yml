@@ -1,0 +1,211 @@
+# Release pipeline, run on every push to `main` (i.e. every merge into it).
+#
+#   version ─┐
+#            ├─> build (matrix) ─> tag ─> release ─┬─> publish-crates
+#   validate ┘                                     └─> sync-develop
+#
+# - The release version is the workspace `package.version` in the root
+#   `Cargo.toml`, used verbatim as the tag name (`X.Y.Z`, no `v` prefix).
+#   Bump it on `develop` before merging; if the tag already exists the
+#   `version` job fails and nothing is built, tagged or released.
+# - `validate` reuses `ci.yml` (fmt, clippy, tests with and without
+#   `test-utils` on all three OSes), so the checks never drift apart.
+# - The tag is pushed only after every target built, so a broken build never
+#   leaves a dangling tag behind.
+# - Pushes made with `GITHUB_TOKEN` (the tag, `develop`) do not trigger other
+#   workflows, which is why tagging and releasing live here rather than in a
+#   separate tag-triggered workflow.
+# - `publish-crates` pushes all four crates to crates.io in dependency order.
+#   The binary crate is published as `metro-feed` (`metro` is taken there),
+#   but still installs the `metro` command. It needs a `CARGO_REGISTRY_TOKEN`
+#   secret (on the `crates-io` environment or the repository).
+
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+# Never run two releases at once, and never cancel one halfway through
+# (a cancelled run could leave a tag without a release).
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  version:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read workspace version and check the tag is free
+        id: version
+        run: |
+          version="$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "metro-feed") | .version')"
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Version '$version' is not in X.Y.Z format"
+            exit 1
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/$version" >/dev/null; then
+            echo "::error::Tag $version already exists. Bump package.version in Cargo.toml before merging into main."
+            exit 1
+          fi
+          echo "Releasing $version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  validate:
+    name: Validate
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    name: Build (${{ matrix.target }})
+    needs: [version, validate]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          # Linux builds use the oldest supported Ubuntu so the binary links
+          # against an older glibc and runs on more distributions.
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04-arm
+          # Intel macOS is cross-compiled on an Apple Silicon runner.
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: ${{ matrix.target }}
+      - name: Build release binary
+        run: cargo build --release --locked -p metro-feed --target "$TARGET"
+      - name: Package archive
+        shell: bash
+        run: |
+          name="metro-$VERSION-$TARGET"
+          mkdir -p "dist/$name"
+          if [[ "$TARGET" == *windows* ]]; then
+            cp "target/$TARGET/release/metro.exe" "dist/$name/"
+          else
+            cp "target/$TARGET/release/metro" "dist/$name/"
+          fi
+          cp README.md LICENSE "dist/$name/"
+          cd dist
+          if [[ "$TARGET" == *windows* ]]; then
+            7z a -tzip "$name.zip" "$name" >/dev/null
+          else
+            tar -czf "$name.tar.gz" "$name"
+          fi
+          rm -rf "$name"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: metro-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  tag:
+    name: Create tag
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Push annotated tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$VERSION" -m "Release $VERSION" "$GITHUB_SHA"
+          git push origin "refs/tags/$VERSION"
+
+  release:
+    name: Publish GitHub release
+    needs: [version, tag]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: metro-*
+          path: dist
+          merge-multiple: true
+      - name: Generate checksums
+        working-directory: dist
+        run: sha256sum metro-* > SHA256SUMS
+      - name: Create release
+        run: |
+          gh release create "$VERSION" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "$VERSION" \
+            --generate-notes
+
+  publish-crates:
+    name: Publish to crates.io
+    needs: release
+    runs-on: ubuntu-latest
+    # Ties the publish to a deployment environment so the token can be scoped
+    # to it (and, optionally, gated behind a manual approval in the repository
+    # settings).
+    environment: crates-io
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+      # Publishes metro-core, metro-cli, metro-tui then metro-feed, waiting
+      # for each to appear in the index before publishing its dependents.
+      # A crates.io version is permanent: it can be yanked but never replaced.
+      - name: Publish workspace
+        run: cargo publish --workspace --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  sync-develop:
+    name: Rebase develop onto main
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: develop
+          fetch-depth: 0
+      - name: Rebase and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          before="$(git rev-parse HEAD)"
+          if ! git rebase "origin/$GITHUB_REF_NAME"; then
+            git rebase --abort
+            echo "::error::develop does not rebase cleanly onto $GITHUB_REF_NAME; sync it manually."
+            exit 1
+          fi
+          # The lease refuses the push if someone pushed to develop while
+          # this job ran, instead of silently discarding their commits.
+          git push --force-with-lease="develop:$before" origin HEAD:develop

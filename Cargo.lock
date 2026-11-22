@@ -807,17 +807,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
-name = "metro"
-version = "0.0.1"
-dependencies = [
- "metro-cli",
- "metro-core",
- "metro-tui",
-]
-
-[[package]]
 name = "metro-cli"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "clap",
  "clap_complete",
@@ -830,7 +821,7 @@ dependencies = [
 
 [[package]]
 name = "metro-core"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "directories",
  "feed-rs",
@@ -846,8 +837,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "metro-feed"
+version = "0.1.0"
+dependencies = [
+ "metro-cli",
+ "metro-core",
+ "metro-tui",
+]
+
+[[package]]
 name = "metro-tui"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "metro-core",
 ]

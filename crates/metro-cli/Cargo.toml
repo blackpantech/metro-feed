@@ -1,10 +1,17 @@
 [package]
 name = "metro-cli"
+description = "Command-line frontend of the Metro feed reader"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
-metro-core = { path = "../metro-core" }
+metro-core = { workspace = true }
 clap = { workspace = true }
 clap_complete = { workspace = true }
 jiff = { workspace = true }
